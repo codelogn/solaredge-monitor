@@ -49,17 +49,20 @@ always means SolarEdge delivery lag.
 
 | # | Caveat |
 |---|---|
-| *1 | SolarEdge snapshots are one instant; occasional 0 W ones are glitches |
+| *1 | SolarEdge readings are one instant each; near-zero ones are real but individual readings say little |
 | *2 | SolarEdge data is only as current as the inverter's last upload |
-| *3 | Daylight min/avg/max come from raw snapshots |
+| *3 | Daylight avg/median/max/near-0 come from individual readings |
 | *4 | Verdict / vs Peers are relative to the panel-model group; can't tell shade from fault alone |
-| *5 | Interval energy is relative only, not real Wh |
+| *5 | Per-report energy is shown but not used — not real Wh and tracks the inverter poorly |
 | *6 | Today's peak is the highest 30 s sample captured |
 | *7 | Inverter metering isn't revenue-grade; "now" can be minutes old |
 | *8 | Optimizer count is SolarEdge's layout, which can include replaced units |
 | *9 | Chart lines bridge short gaps |
 | *10 | Gaps / data age can be delivery stalls, not the optimizer |
 | *11 | Hourly profile has few samples per hour |
+| *12 | Average DC power is time-weighted over the readings captured |
+| *13 | Partial day — Modbus didn't see all of production |
+| *14 | Per-panel daily energy: measured (delivered readings only) vs estimated (inverter's energy shared out), and coverage |
 
 ## Status cards
 
@@ -75,7 +78,8 @@ always means SolarEdge delivery lag.
 ## Inverter today & cloud upload delay
 
 Live from Modbus, sampled every 30 s: DC power, inverter status, today's
-peak DC (shown against `ARRAY_NAMEPLATE_W` if set), energy today from the
+peak DC (shown against `ARRAY_NAMEPLATE_W` if set), average DC power while
+producing (time-weighted), energy today from the
 inverter's own counter, and the Modbus success rate for the last hour.
 
 **Cloud Delay** is poll time minus the newest optimizer measurement in that
@@ -84,6 +88,30 @@ SolarEdge is receiving uploads late and per-panel data for that period will
 be late or missing. Blank when the inverter isn't producing, because
 optimizers legitimately stop reporting after dark. The chart overlays DC
 power and delay for the day.
+
+## Inverter history (`inverter.html`)
+
+Every card in the inverter section links here, opened on the matching
+metric: energy per day, peak and average DC power, production hours, grid
+AC voltage range, heatsink temperature and throttled/fault readings, Modbus
+read success, and SolarEdge per-panel coverage. Pick 30 / 90 / 365 days or
+everything. Clicking a day (bar or table row) shows that day's full
+30-second power curve, with AC power, grid voltage and heatsink temperature
+available as toggles. Days marked **partial** weren't fully seen by Modbus;
+per-panel coverage below 100% means part of that day's SolarEdge data never
+arrived. See `inverter_daily` in [03-data-model.md](03-data-model.md).
+
+## Panel history (`panels.html`)
+
+A grid of every panel × every day (14 / 30 / 90 / 365 days), switchable
+between vs peers, estimated energy, measured energy, time near 0 A and
+per-panel data coverage, with a total or median per panel. Colours run red
+→ green within the metric; dashed cells had under 90% coverage; ⚠ marks days
+the inverter was only partly read. Built for spotting a panel that drifts
+down over weeks. Linked from the Health verdict heading; click a panel for
+its detail page. The detail page itself now opens with that panel's daily
+energy chart (estimated and measured bars, coverage line). See
+`panel_daily` in [03-data-model.md](03-data-model.md).
 
 ## Optimizers table
 
@@ -106,10 +134,11 @@ the method.
 |---|---|
 | **Verdict** | GOOD / LIKELY GOOD / WATCH / SUSPECT / BAD / NO DATA |
 | **Score** | 0-100, output-vs-peers multiplied by reporting reliability |
-| **vs Peers** | Interval energy as % of its panel-model group's median *in the same 15-minute window*. 100% = producing like its neighbours |
+| **vs Peers** | Average power over its readings as % of its panel-model group's median *in the same 15-minute window*. 100% = producing like its neighbours |
 | **F / S / M** | Fresh / Stale / Missing counts across the polls that observed a scored window (informational) |
 | **Fresh %** | Reliability: share of scored daylight windows it reported in, vs its peers |
-| **Avg/Min/Max W, V, A ☀** | Daylight-only value stats |
+| **Avg/Median/Max W, V, A ☀** | Daylight-only value stats (median, not minimum — see [04](04-analysis-method.md)) |
+| **Near 0 ☀** | Share of daylight readings under 0.2 A. Amber above 10%. Leans higher on weaker panels, but loosely — supporting evidence only |
 | **Confidence** | Sample-size based. **Check this before acting** |
 
 Two dropdowns:
@@ -130,7 +159,7 @@ light, or readings not taken close enough together.
 - **Verdict banner** — score, output vs peers, reporting %, and confidence,
   with an explicit warning when confidence is weak.
 - **Cards** — freshness and F/S/M (daylight), whether it's currently
-  reporting, gap count, and daylight min/avg/max for power, voltage and
+  reporting, gap count, and daylight avg/median/max for power, voltage and
   current.
 - **Voltage/current/power over time** — breaks in the line are cycles where
   it reported nothing; flat stretches are repeated stale readings.
@@ -156,4 +185,8 @@ All read-only JSON.
 | `/api/optimizers/{serial}/readings?hours=` | Raw history |
 | `/api/optimizers/{serial}/analysis?hours=` | Gaps, coverage, stuck time |
 | `/api/errors?limit=` | Failed poll cycles — our problems only |
+| `/api/optimizers/{serial}/daily?days=` | One optimizer's `panel_daily` rows, today live |
+| `/api/panels/daily?days=` | Every optimizer's daily rows plus the inverter's per-day energy — the panel history page |
+| `/api/inverter/history?days=` | One row per day from `inverter_daily`, today recomputed live |
+| `/api/inverter/day?date=YYYY-MM-DD` | That day's raw inverter readings (stale snapshots removed) and summary |
 | `/api/inverter` | Today's Modbus series, peak, energy, Modbus failure rate, cloud delay series |

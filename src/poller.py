@@ -22,7 +22,7 @@ from types import FrameType
 
 import requests
 
-from . import db, modbus_client
+from . import daily, db, modbus_client
 from .client import RateLimited, SolarEdgeClient
 from .config import Config
 from .discover import Optimizer, discover_optimizers
@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 
 _shutdown = False
 _stop = threading.Event()
+
+MAINTENANCE_INTERVAL_SECONDS = 3600
 
 
 def _handle_signal(signum: int, frame: FrameType | None) -> None:
@@ -128,6 +130,7 @@ def run() -> None:
         )
 
     backoff_until = 0.0
+    last_maintenance = 0.0
 
     while not _shutdown:
         cycle_start = time.monotonic()
@@ -190,6 +193,17 @@ def run() -> None:
                 duration_ms=int((time.monotonic() - cycle_start) * 1000),
                 requests_made=client.request_count - requests_before,
             )
+
+        # Daily inverter + per-panel history and raw retention, hourly.
+        # Between polls, and isolated, so it can never cost a cycle.
+        if time.monotonic() - last_maintenance > MAINTENANCE_INTERVAL_SECONDS:
+            last_maintenance = time.monotonic()
+            try:
+                daily.run_maintenance(
+                    cfg.db_path, cfg.site_timezone, cfg.inverter_retention_days,
+                    cfg.optimizer_retention_days, cfg.decommissioned)
+            except Exception:
+                logger.exception("Daily history update failed")
 
         elapsed = time.monotonic() - cycle_start
         _stop.wait(max(0.0, cfg.poll_interval_seconds - elapsed))

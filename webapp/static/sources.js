@@ -46,12 +46,13 @@ function srcLegend() {
 const ACCURACY = {
   1: {
     title: "Instant snapshot",
-    short: "one instant, not an average; occasional 0 W snapshots are glitches",
+    short: "one instant, not an average — output swings a lot between readings",
     long: `SolarEdge's per-optimizer voltage, current and power are a single instant, taken every
       3–6 minutes on each optimizer's own schedule. Under moving cloud, two panels read a minute
-      apart can see different light. Optimizers also commonly report a snapshot of 0 A at
-      open-circuit voltage (0 W) while the panel is actually producing — the optimizer's energy
-      counter for those moments is normal. Don't judge a panel on one snapshot.`,
+      apart can see different light, and readings near 0 A are common. Checked against the
+      inverter's own DC power, those near-zero readings are real — averaged over time, the
+      optimizers' readings match what the inverter measures — so they're kept, but no single
+      reading says much about a panel. Judge it on averages over time.`,
   },
   2: {
     title: "Delivery lag",
@@ -62,12 +63,14 @@ const ACCURACY = {
       late or never. The SolarEdge app has the same lag.`,
   },
   3: {
-    title: "Daylight min / avg / max",
-    short: "computed from raw snapshots — a 0 W minimum is usually a glitch",
-    long: `Computed from the raw snapshots (*1) in the scored daylight windows, so a 0 W minimum is
-      usually a telemetry glitch rather than a real dropout, and the maximum depends on which
-      moments happened to be sampled. Use them as a rough range; the verdict and "vs Peers" use
-      interval energy instead and are more reliable.`,
+    title: "Daylight avg / median / max / near 0",
+    short: "from the individual readings (*1) in the scored daylight windows",
+    long: `Computed from every individual reading (*1) in the scored daylight windows. The average is
+      the figure checked against the inverter. The maximum depends on which moments happened to be
+      sampled. Median replaces the minimum, which was ~0 for nearly every panel and told them apart
+      not at all. "Near 0" is the share of those readings below 0.2 A — how much of the good-light
+      time the panel spent producing almost nothing. It leans higher on weaker panels, but only
+      loosely; use it as supporting evidence, not on its own.`,
   },
   4: {
     title: "Verdict / vs Peers",
@@ -80,11 +83,11 @@ const ACCURACY = {
       under-represented. Always read the Confidence column.`,
   },
   5: {
-    title: "Interval energy is relative only",
-    short: "overlapping ~15-min windows — not real watt-hours",
-    long: `SolarEdge's per-report energy covers a trailing window of roughly 15 minutes, and
-      consecutive reports overlap — summed, it comes to several times the inverter's real energy. It is
-      valid for comparing panels with each other, not as an amount of energy.`,
+    title: "Per-report energy — shown, not used",
+    short: "not real watt-hours, and doesn't track the inverter well",
+    long: `SolarEdge's per-report energy figure covers overlapping windows, so it isn't an amount of
+      energy, and checked against the inverter it scattered about three times as much as the power
+      readings do. It's shown for completeness; nothing on this dashboard is computed from it.`,
   },
   6: {
     title: "Sampled peak",
@@ -128,6 +131,35 @@ const ACCURACY = {
     long: `Each hour's figure is the median of only a handful of 15-minute windows per day of data,
       so hours with few samples swing a lot. Afternoons are thin when uploads stall (*2). Look for
       patterns repeated over several days rather than single hours.`,
+  },
+  12: {
+    title: "Sampled average",
+    short: "time-weighted average of the readings we captured while producing",
+    long: `Average DC power while the inverter was producing (at least 50 W), weighted by time
+      between the 30-second readings we captured. Stretches of more than 10 minutes without a
+      successful read are left out rather than guessed, so on a day with many failed reads the
+      average reflects the parts of the day we actually saw.`,
+  },
+  13: {
+    title: "Partial day",
+    short: "Modbus didn't see the whole production day — energy and averages undercount",
+    long: `Marked when inverter readings didn't cover the start or the end of that day's production —
+      typically the day Modbus was first set up, or a long outage of the inverter's network link.
+      That day's energy, average and hours only cover the part that was seen. Days are summarised
+      from the raw readings, which are kept for <code>INVERTER_RETENTION_DAYS</code> (365 by
+      default); the per-day summaries themselves are kept indefinitely.`,
+  },
+  14: {
+    title: "Per-panel daily energy",
+    short: "measured = delivered readings only; estimated = inverter's energy shared out",
+    long: `Per-panel data only reaches us through SolarEdge, so two figures are kept for each panel and
+      day. <b>Measured</b> adds up the panel's own power readings over the time they cover — exact for
+      what arrived, but short on days when stretches never did. <b>Estimated</b> takes the inverter's
+      measured energy for the day and shares it out by each panel's measured portion, so the panels add
+      up to what the inverter really produced; it assumes each panel's share during the missing hours
+      matched the delivered ones, which isn't true for a panel shaded only then. No estimate is made on
+      days Modbus didn't see in full. <b>Coverage</b> says how much of the producing day had this
+      panel's data — below ~90%, compare panels on that day with care.`,
   },
 };
 

@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SolarMonitor — Panel History</title>
+<link rel="stylesheet" href="sources.css">
+<script src="sources.js"></script>
+<style>
+  :root {
+    --bg: #0f1420; --panel: #161d2e; --panel-2: #1c2438; --border: #2a3450;
+    --text: #e6ebf5; --muted: #8b95ab; --accent: #4f8cff;
+    --ok: #2ecc71; --warn: #f5a623; --bad: #e5484d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    background: var(--bg); color: var(--text); padding: 24px; max-width: 1500px; margin: 0 auto;
+  }
+  a { color: var(--accent); text-decoration: none; font-size: 13px; }
+  h1 { font-size: 20px; margin: 10px 0 2px; }
+  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; margin-bottom: 20px; }
+  section h2 { font-size: 15px; margin: 0 0 12px; display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+  .muted { color: var(--muted); }
+  .tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+  .tab { background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); border-radius: 6px;
+    padding: 5px 11px; font-size: 13px; cursor: pointer; }
+  .tab.active { color: var(--text); border-color: var(--accent); background: rgba(79,140,255,0.12); }
+  select { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; font-size: 13px; }
+  .desc { font-size: 12px; color: var(--muted); line-height: 1.5; margin: 10px 0; }
+  .scroll-x { overflow-x: auto; }
+  table.grid { border-collapse: separate; border-spacing: 2px; font-size: 12px; }
+  table.grid th { color: var(--muted); font-weight: 500; white-space: nowrap; padding: 3px 5px; text-align: center; }
+  table.grid th.rowhead, table.grid td.rowhead {
+    position: sticky; left: 0; background: var(--panel); text-align: left; z-index: 1; padding-right: 10px;
+  }
+  table.grid td { text-align: center; padding: 4px 3px; min-width: 38px; border-radius: 3px;
+    font-variant-numeric: tabular-nums; white-space: nowrap; }
+  table.grid td.cell { cursor: pointer; }
+  table.grid td.low-cov { outline: 1px dashed rgba(245,166,35,0.7); outline-offset: -2px; }
+  table.grid td.sum { font-weight: 600; background: var(--panel-2); }
+  table.grid tr:hover td.rowhead { color: var(--accent); }
+  .day-head { writing-mode: vertical-rl; transform: rotate(180deg); height: 58px; }
+  .legend-bar { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); margin-top: 10px; flex-wrap: wrap; }
+  .swatch { display: inline-block; width: 22px; height: 12px; border-radius: 2px; }
+</style>
+</head>
+<body>
+  <a href="/">&larr; Back to dashboard</a>
+  <h1>Panel history</h1>
+  <div class="subtitle">Every panel, every day — from SolarEdge's per-panel data, summarised on this machine.
+    Click a panel for its detail page.</div>
+  <div id="srcLegend"></div>
+
+  <section>
+    <h2>
+      <span id="metricTitle">—</span>
+      <select id="rangeSelect">
+        <option value="14">Last 14 days</option>
+        <option value="30" selected>Last 30 days</option>
+        <option value="90">Last 90 days</option>
+        <option value="365">Last 365 days</option>
+      </select>
+    </h2>
+    <div class="tabs" id="tabs"></div>
+    <p class="desc" id="metricDesc"></p>
+    <div class="scroll-x"><table class="grid" id="grid"></table></div>
+    <div class="legend-bar" id="legendBar"></div>
+    <p class="desc" id="retentionNote"></p>
+  </section>
+
+  <div id="accKeyHolder"></div>
+
+<script>
+const METRICS = {
+  vs_peers_pct: {
+    title: "Output vs peers (%)", src: ["calc", "se"], acc: 4,
+    desc: `Each panel's average power as a % of its panel-model group's median, per day (same method as the
+      dashboard verdict). 100% = like its group. A panel that drifts down over weeks is the thing to catch
+      here; a single low day is usually weather or shade.`,
+    fmt: v => Math.round(v) + "", scale: v => (v - 50) / 70, summary: "median",
+  },
+  estimated_wh: {
+    title: "Estimated energy per panel (Wh)", src: ["calc", "se"], acc: 14,
+    desc: `The inverter's measured energy for the day, shared out by each panel's measured portion — adds up
+      to what the inverter produced. Blank on days Modbus didn't see in full.`,
+    fmt: v => Math.round(v) + "", scale: null, summary: "sum",
+  },
+  measured_wh: {
+    title: "Measured energy per panel (Wh)", src: ["calc", "se"], acc: 14,
+    desc: `The panel's own readings added up over the time SolarEdge delivered them. Exact for what arrived;
+      short on days with low coverage (dashed cells).`,
+    fmt: v => Math.round(v) + "", scale: null, summary: "sum",
+  },
+  near_zero_pct: {
+    title: "Time near 0 A (% of daylight readings)", src: ["calc", "se"], acc: 3,
+    desc: `Share of the day's readings under 0.2 A. Leans higher on shaded or weaker panels, but loosely —
+      supporting evidence next to vs peers, not a verdict.`,
+    fmt: v => Math.round(v) + "", scale: v => 1 - v / 40, summary: "median",
+  },
+  coverage_pct: {
+    title: "Per-panel data coverage (%)", src: ["calc", "se"], acc: 2,
+    desc: `How much of each day's production had this panel's data from SolarEdge. Low days are when the
+      inverter's uploads fell behind — compare panels on those days with care.`,
+    fmt: v => Math.round(v) + "", scale: v => (v - 50) / 50, summary: "median",
+  },
+};
+const LOW_COVERAGE = 90;
+
+const params = new URLSearchParams(location.search);
+let metric = METRICS[params.get("metric")] ? params.get("metric") : "vs_peers_pct";
+let data = null;
+
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+function pos(label) { return (label || "").replace("Optimizer ", "").split(" ")[0]; }
+function posKey(label) { return pos(label).split(".").map(n => n.padStart(4, "0")).join("."); }
+function dayShort(day) {
+  return new Date(day + "T12:00:00Z").toLocaleDateString([], { month: "numeric", day: "numeric", timeZone: "UTC" });
+}
+// red (0) -> amber -> green (1)
+function color(t) {
+  t = Math.max(0, Math.min(1, t));
+  const h = 5 + t * 125;
+  return `hsla(${h}, 65%, 42%, 0.85)`;
+}
+
+function renderTabs() {
+  document.getElementById("tabs").innerHTML = Object.entries(METRICS).map(([k, m]) =>
+    `<button class="tab ${k === metric ? "active" : ""}" data-metric="${k}">${m.title.replace(/ \(.*\)/, "")}</button>`).join("");
+  document.querySelectorAll(".tab").forEach(b => b.addEventListener("click", () => {
+    metric = b.dataset.metric;
+    const u = new URL(location.href); u.searchParams.set("metric", metric);
+    window.history.replaceState(null, "", u);
+    renderTabs(); renderGrid();
+  }));
+}
+
+async function load() {
+  const days = document.getElementById("rangeSelect").value;
+  data = await getJSON(`/api/panels/daily?days=${days}`);
+  document.getElementById("retentionNote").textContent =
+    `Daily per-panel summaries are kept indefinitely; the raw readings behind them are kept ` +
+    (data.retention_days ? `${data.retention_days} days.` : `indefinitely.`);
+  renderGrid();
+}
+
+function renderGrid() {
+  const m = METRICS[metric];
+  const [kind, from] = m.src;
+  document.getElementById("metricTitle").innerHTML = `${m.title}${acc(m.acc)} ${src(kind, from)}`;
+  document.getElementById("metricDesc").innerHTML = m.desc;
+  const days = data.days;
+  const opts = [...data.optimizers].sort((a, b) => posKey(a.label).localeCompare(posKey(b.label)));
+
+  // Energy colours scale to the range's own spread.
+  let scale = m.scale;
+  if (!scale) {
+    const all = days.flatMap(d => Object.values(data.values[d] || {}).map(v => v[metric])).filter(v => v != null);
+    const lo = Math.min(...all), hi = Math.max(...all);
+    scale = v => hi > lo ? (v - lo) / (hi - lo) : 0.5;
+  }
+
+  const head = `<tr><th class="rowhead">Panel</th><th>Group</th>
+    ${days.map(d => {
+      const inv = data.inverter[d];
+      const flag = inv && inv.partial ? " ⚠" : "";
+      return `<th title="${d}${inv ? ` · inverter ${(inv.energy_wh / 1000).toFixed(2)} kWh${inv.partial ? " (partial day)" : ""}` : ""}"><div class="day-head">${dayShort(d)}${flag}</div></th>`;
+    }).join("")}
+    <th>${m.summary === "sum" ? "Total" : "Median"}</th></tr>`;
+
+  const rows = opts.map(o => {
+    const vals = [];
+    const cells = days.map(d => {
+      const f = (data.values[d] || {})[o.serial];
+      const v = f ? f[metric] : null;
+      if (v == null) return `<td class="muted">·</td>`;
+      vals.push(v);
+      const low = f.coverage_pct != null && f.coverage_pct < LOW_COVERAGE;
+      const tip = `${pos(o.label)} · ${d}: ${m.fmt(v)}` +
+        ` · coverage ${f.coverage_pct ?? "—"}% · measured ${Math.round(f.measured_wh ?? 0)} Wh` +
+        (f.estimated_wh != null ? ` · estimated ${Math.round(f.estimated_wh)} Wh` : "") +
+        (f.finalized ? "" : " · may still change");
+      return `<td class="cell ${low ? "low-cov" : ""}" style="background:${color(scale(v))}" title="${tip}"
+        data-serial="${o.serial}">${m.fmt(v)}</td>`;
+    }).join("");
+    let summary = "—";
+    if (vals.length) {
+      if (m.summary === "sum") summary = (vals.reduce((a, b) => a + b, 0) / 1000).toFixed(1) + " kWh";
+      else { const s = [...vals].sort((a, b) => a - b); summary = m.fmt(s[Math.floor(s.length / 2)]); }
+    }
+    return `<tr><td class="rowhead"><a href="optimizer.html?serial=${encodeURIComponent(o.serial)}">${pos(o.label)}</a></td>
+      <td class="muted">${o.panel_model ?? ""}</td>${cells}<td class="sum">${summary}</td></tr>`;
+  }).join("");
+
+  document.getElementById("grid").innerHTML = `<thead>${head}</thead><tbody>${rows}</tbody>`;
+  document.querySelectorAll("#grid td.cell").forEach(td => td.addEventListener("click", () =>
+    location.href = `optimizer.html?serial=${encodeURIComponent(td.dataset.serial)}`));
+  document.getElementById("legendBar").innerHTML = `
+    <span class="swatch" style="background:${color(0)}"></span> low
+    <span class="swatch" style="background:${color(0.5)}"></span>
+    <span class="swatch" style="background:${color(1)}"></span> high
+    <span style="margin-left:14px"><span class="swatch" style="outline:1px dashed rgba(245,166,35,0.9);outline-offset:-2px"></span>
+      coverage under ${LOW_COVERAGE}%${acc(14)}</span>
+    <span style="margin-left:14px">⚠ day the inverter was only partly read${acc(13)}</span>
+    <span style="margin-left:14px">hover a cell for details</span>`;
+}
+
+document.getElementById("srcLegend").innerHTML = srcLegend();
+document.getElementById("accKeyHolder").innerHTML = accKey([2, 3, 4, 13, 14]);
+fillMarkers();
+document.getElementById("rangeSelect").addEventListener("change", load);
+renderTabs();
+load();
+</script>
+</body>
+</html>

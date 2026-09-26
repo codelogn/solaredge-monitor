@@ -70,6 +70,19 @@
   <div class="cards" id="analysisCards"></div>
 
   <section>
+    <h2><span>Daily energy — last 365 days<span data-acc="14"></span> <span data-src="calc" data-from="se"></span></span>
+      <a href="panels.html" style="font-weight:400">compare all panels →</a></h2>
+    <div class="muted" style="font-size:12px; margin-bottom:8px; line-height:1.5;">
+      <b>Estimated</b>: the inverter's measured energy for the day, shared out by this panel's portion
+      (blank when the inverter wasn't read all day). <b>Measured</b>: this panel's own readings added up over
+      the time SolarEdge delivered them. The line is <b>coverage</b> — how much of the producing day had this
+      panel's data; where it dips, measured energy is short and the estimate leans on the hours that did arrive.
+    </div>
+    <div class="chart-wrap" style="height:260px"><canvas id="dailyChart"></canvas></div>
+    <div id="dailyNote" class="muted" style="font-size:12px; margin-top:6px;"></div>
+  </section>
+
+  <section>
     <h2><span>Voltage / Current / Power over time<span data-acc="1"></span><span data-acc="2"></span> <span data-src="se"></span></span></h2>
     <div class="muted" style="font-size:12px; margin-bottom:8px;">
       Breaks in the lines are cycles where this optimizer reported nothing (MISSING).
@@ -119,7 +132,7 @@
             <th class="num from-se">Opt. Voltage (V)</th>
             <th class="num from-se">Current (A)</th>
             <th class="num from-se">Power (W)<span data-acc="1"></span></th>
-            <th class="num from-se" title="SolarEdge's interval energy (~15 min trailing window) — relative only, not true Wh">Energy (interval)<span data-acc="5"></span></th>
+            <th class="num from-se" title="SolarEdge's per-report energy — shown for completeness, not used in any calculation">Energy (interval)<span data-acc="5"></span></th>
           </tr>
         </thead>
         <tbody></tbody>
@@ -216,14 +229,14 @@ async function loadAnalysis() {
     <div class="card"><div class="label">Gaps Detected${acc(10)} ${src("calc", "se")}</div><div class="value">${a.gaps.length}</div></div>
     <div class="card"><div class="label">Power <span style="text-transform:none">(daylight)</span>${acc(3)} ${src("calc", "se")}</div>
       <div class="value">${fmt(h.avg_power, 1)} W</div>
-      <div class="sub">min ${fmt(h.min_power, 1)} · max ${fmt(h.max_power, 1)} W</div></div>
+      <div class="sub">median ${fmt(h.median_power, 1)} · max ${fmt(h.max_power, 1)} W</div></div>
     <div class="card"><div class="label">Voltage <span style="text-transform:none">(daylight)</span>${acc(3)} ${src("calc", "se")}</div>
       <div class="value">${fmt(h.avg_voltage)} V</div>
-      <div class="sub">min ${fmt(h.min_voltage)} · max ${fmt(h.max_voltage)} V</div></div>
+      <div class="sub">median ${fmt(h.median_voltage)} · max ${fmt(h.max_voltage)} V</div></div>
     <div class="card"><div class="label">Current <span style="text-transform:none">(daylight)</span>${acc(3)} ${src("calc", "se")}</div>
       <div class="value">${fmt(h.avg_current, 3)} A</div>
-      <div class="sub">min ${fmt(h.min_current, 3)} · max ${fmt(h.max_current, 3)} A</div></div>
-    <div class="card"><div class="label">Zero-Power${acc(1)} ${src("calc", "se")}</div><div class="value">${a.zero_power_count}</div><div class="sub">0 W snapshots, incl. night · daytime ones are usually telemetry glitches (energy unaffected)</div></div>
+      <div class="sub">median ${fmt(h.median_current, 3)} · max ${fmt(h.max_current, 3)} A · near 0: ${h.near_zero_pct ?? "—"}% of readings</div></div>
+    <div class="card"><div class="label">Zero-Power${acc(1)} ${src("calc", "se")}</div><div class="value">${a.zero_power_count}</div><div class="sub">readings at exactly 0 W, including night · daytime ones are real moments of no output (see "near 0" above)</div></div>
   `;
 
   const gapsEl = document.getElementById("gapsContainer");
@@ -371,7 +384,54 @@ async function loadDataHealth() {
   } catch (e) {}
 }
 
+let dailyChart = null;
+
+async function loadDaily() {
+  let d;
+  try { d = await getJSON(`/api/optimizers/${encodeURIComponent(serial)}/daily?days=365`); } catch (e) { return; }
+  const days = d.days;
+  const label = day => new Date(day + "T12:00:00Z").toLocaleDateString([], { month: "short", day: "numeric", timeZone: "UTC" });
+  document.getElementById("dailyNote").textContent = days.length
+    ? `${days.length} day${days.length === 1 ? "" : "s"} recorded · raw readings kept ${d.retention_days || "∞"} days, daily figures indefinitely`
+    : "No daily figures yet.";
+  if (dailyChart) dailyChart.destroy();
+  dailyChart = new Chart(document.getElementById("dailyChart"), {
+    type: "bar",
+    data: {
+      labels: days.map(x => x.day),
+      datasets: [
+        { label: "Estimated (Wh)", data: days.map(x => x.estimated_wh), backgroundColor: "#4f8cffcc", yAxisID: "y" },
+        { label: "Measured (Wh)", data: days.map(x => x.measured_wh), backgroundColor: "#2ecc7188", yAxisID: "y" },
+        { label: "Coverage (%)", data: days.map(x => x.coverage_pct), type: "line", borderColor: "#f5a623",
+          pointRadius: days.length > 60 ? 0 : 3, yAxisID: "y1" },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: "index", intersect: false },
+      scales: {
+        x: { ticks: { color: "#8b95ab", maxTicksLimit: 14, callback: (v, i) => label(days[i].day) }, grid: { color: "#2a3450" } },
+        y: { beginAtZero: true, title: { display: true, text: "Wh", color: "#8b95ab" }, ticks: { color: "#8b95ab" }, grid: { color: "#2a3450" } },
+        y1: { position: "right", min: 0, max: 100, title: { display: true, text: "coverage %", color: "#8b95ab" }, ticks: { color: "#8b95ab" }, grid: { drawOnChartArea: false } },
+      },
+      plugins: {
+        legend: { labels: { color: "#e6ebf5" } },
+        tooltip: { callbacks: {
+          title: items => items.length ? label(days[items[0].dataIndex].day) : "",
+          footer: items => {
+            if (!items.length) return "";
+            const x = days[items[0].dataIndex];
+            return [`vs peers ${x.vs_peers_pct ?? "—"}% · near 0 ${x.near_zero_pct ?? "—"}%`,
+                    x.finalized ? "" : "may still change"].filter(Boolean);
+          },
+        } },
+      },
+    },
+  });
+}
+
 async function refreshAll() {
+  loadDaily();
   loadDataHealth();
   await loadVerdict();          // must land first: loadAnalysis reads its stats
   await Promise.all([loadAnalysis(), loadReadings(), loadHourlyProfile()]);

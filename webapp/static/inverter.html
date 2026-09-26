@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SolarMonitor — Inverter History</title>
+<script src="chart.umd.min.js"></script>
+<link rel="stylesheet" href="sources.css">
+<script src="sources.js"></script>
+<style>
+  :root {
+    --bg: #0f1420; --panel: #161d2e; --panel-2: #1c2438; --border: #2a3450;
+    --text: #e6ebf5; --muted: #8b95ab; --accent: #4f8cff;
+    --ok: #2ecc71; --warn: #f5a623; --bad: #e5484d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    background: var(--bg); color: var(--text); padding: 24px; max-width: 1400px; margin: 0 auto;
+  }
+  a { color: var(--accent); text-decoration: none; font-size: 13px; }
+  h1 { font-size: 20px; margin: 10px 0 2px; }
+  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; margin-bottom: 20px; }
+  section h2 { font-size: 15px; margin: 0 0 12px; display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .badge.ok { background: rgba(46,204,113,0.15); color: var(--ok); }
+  .badge.warn { background: rgba(245,166,35,0.15); color: var(--warn); }
+  .badge.bad { background: rgba(229,72,77,0.15); color: var(--bad); }
+  .badge.muted { background: rgba(139,149,171,0.15); color: var(--muted); }
+  .muted { color: var(--muted); }
+  .tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+  .tab { background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); border-radius: 6px;
+    padding: 5px 11px; font-size: 13px; cursor: pointer; }
+  .tab.active { color: var(--text); border-color: var(--accent); background: rgba(79,140,255,0.12); }
+  select { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; font-size: 13px; }
+  .chart-wrap { height: 320px; }
+  .desc { font-size: 12px; color: var(--muted); line-height: 1.5; margin: 0 0 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 9px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover td { background: var(--panel-2); }
+  tbody tr.selected td { background: rgba(79,140,255,0.12); }
+  .scroll-x { overflow-x: auto; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 13px; margin-bottom: 10px; }
+  .chips b { font-size: 15px; }
+  .empty { color: var(--muted); font-size: 13px; padding: 12px 0; }
+</style>
+</head>
+<body>
+  <a href="/">&larr; Back to dashboard</a>
+  <h1>Inverter history</h1>
+  <div class="subtitle">One row per day, from the inverter's own readings over your LAN. Click a day
+    (in the chart or the table) to see its full power curve.</div>
+  <div id="srcLegend"></div>
+
+  <section>
+    <h2>
+      <span id="metricTitle">—</span>
+      <span style="display:flex; gap:8px; align-items:center;">
+        <select id="rangeSelect">
+          <option value="30">Last 30 days</option>
+          <option value="90">Last 90 days</option>
+          <option value="365" selected>Last 365 days</option>
+          <option value="100000">Everything</option>
+        </select>
+      </span>
+    </h2>
+    <div class="tabs" id="tabs" style="margin-bottom:12px;"></div>
+    <p class="desc" id="metricDesc"></p>
+    <div class="chart-wrap"><canvas id="historyChart"></canvas></div>
+  </section>
+
+  <section id="daySection">
+    <h2><span id="dayTitle">—</span><span id="dayBadges"></span></h2>
+    <div class="chips" id="dayChips"></div>
+    <div class="chart-wrap"><canvas id="dayChart"></canvas></div>
+    <p class="desc" id="dayNote" style="margin-top:8px;"></p>
+  </section>
+
+  <section>
+    <h2><span>Daily summary <span data-src="calc" data-from="inv"></span></span>
+      <span class="muted" style="font-weight:400; font-size:12px;" id="retentionNote"></span></h2>
+    <div class="scroll-x">
+    <table id="dayTable">
+      <thead><tr>
+        <th>Day</th>
+        <th class="num from-calc">Energy (kWh)<span data-acc="7"></span></th>
+        <th class="num from-calc">Peak DC (W)<span data-acc="6"></span></th>
+        <th class="num from-calc">Avg DC (W)<span data-acc="12"></span></th>
+        <th class="num from-calc">Producing (h)</th>
+        <th class="num from-calc">Grid AC (V)</th>
+        <th class="num from-calc">Max temp (°C)</th>
+        <th class="num from-calc">Throttled / fault</th>
+        <th class="num from-calc">Modbus reads</th>
+        <th class="num from-calc">Per-panel data<span data-acc="2"></span></th>
+        <th>Notes</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+    </div>
+  </section>
+
+  <div id="accKeyHolder"></div>
+
+<script>
+// Each metric the dashboard's inverter cards link to (?metric=...).
+const METRICS = {
+  energy: {
+    title: "Energy per day", type: "bar", src: ["calc", "inv"],
+    desc: `The rise in the inverter's own lifetime energy counter across each site-local day (AC).
+      This is the figure to compare with your utility meter or the SolarEdge app.`,
+    series: [{ label: "Energy (kWh)", value: d => d.energy_wh == null ? null : d.energy_wh / 1000, color: "#4f8cff" }],
+    unit: "kWh",
+  },
+  power: {
+    title: "Peak and average DC power", type: "line", src: ["calc", "inv"],
+    desc: `Peak: the highest 30-second reading captured that day. Average: time-weighted DC power
+      while producing (≥50 W). A falling peak on clear days points at a system problem; the average
+      tracks the weather.`,
+    series: [
+      { label: "Peak DC (W)", value: d => d.peak_dc_w, color: "#4f8cff" },
+      { label: "Avg DC while producing (W)", value: d => d.avg_dc_w, color: "#2ecc71" },
+    ],
+    unit: "W", nameplate: true,
+  },
+  hours: {
+    title: "Production hours", type: "bar", src: ["calc", "inv"],
+    desc: "From the first to the last reading at or above 50 W DC. Follows day length and morning/evening shade.",
+    series: [{ label: "Producing (h)", value: d => d.producing_hours, color: "#f5a623" }],
+    unit: "h",
+  },
+  grid: {
+    title: "Grid (AC) voltage range while producing", type: "line", src: ["calc", "inv"],
+    desc: `Lowest and highest AC voltage the inverter measured while producing. Persistently high grid
+      voltage can make an inverter reduce output; compare with your grid's nominal voltage and the
+      inverter's country setting.`,
+    series: [
+      { label: "Max AC (V)", value: d => d.max_ac_v, color: "#e5484d" },
+      { label: "Min AC (V)", value: d => d.min_ac_v, color: "#4f8cff" },
+    ],
+    unit: "V",
+  },
+  status: {
+    title: "Heatsink temperature and abnormal status", type: "line", src: ["calc", "inv"],
+    desc: `Hottest heatsink reading while producing, and how many readings showed the inverter
+      throttled (SunSpec status 5) or in fault (7). Any non-zero count is worth a look in SetApp.`,
+    series: [
+      { label: "Max heatsink (°C)", value: d => d.max_temp_c, color: "#f5a623" },
+      { label: "Throttled/fault readings", value: d => d.abnormal_samples, color: "#e5484d", axis: "y1" },
+    ],
+    unit: "°C",
+  },
+  modbus: {
+    title: "Modbus read success", type: "bar", src: ["calc"],
+    desc: `Share of reads of the inverter that succeeded (after retries) each day. Low values mean the
+      inverter's network link is weak; the dashboard's figures for that day are built from fewer
+      readings.`,
+    series: [{ label: "Reads succeeded (%)", value: d => readPct(d), color: "#22d3ee" }],
+    unit: "%",
+  },
+  panels: {
+    title: "Per-panel data coverage (SolarEdge)", type: "bar", src: ["calc", "se"],
+    desc: `Of each day's producing 15-minute windows, the share with SolarEdge per-panel data from at
+      least half the optimizers. Below 100% means the inverter's uploads fell behind and part of that
+      day's per-panel history never arrived — those hours can't be used to judge panels.`,
+    series: [{ label: "Per-panel coverage (%)", value: d => d.se_coverage_pct, color: "#a78bfa" }],
+    unit: "%",
+  },
+};
+
+const params = new URLSearchParams(location.search);
+let metric = METRICS[params.get("metric")] ? params.get("metric") : "energy";
+let selectedDay = params.get("day");
+let history = null, historyChart = null, dayChart = null;
+
+function readPct(d) {
+  const t = (d.reads_ok || 0) + (d.reads_failed || 0);
+  return t ? Math.round(1000 * d.reads_ok / t) / 10 : null;
+}
+function fmt(n, digits = 0) { return n == null ? "—" : Number(n).toFixed(digits); }
+function clock(iso, tz) {
+  return iso ? new Date(iso).toLocaleTimeString([], { timeZone: tz, hour: "2-digit", minute: "2-digit" }) : "—";
+}
+function dayLabel(day) {
+  return new Date(day + "T12:00:00Z").toLocaleDateString([], { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
+}
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+function renderTabs() {
+  document.getElementById("tabs").innerHTML = Object.entries(METRICS).map(([k, m]) =>
+    `<button class="tab ${k === metric ? "active" : ""}" data-metric="${k}">${m.title}</button>`).join("");
+  document.querySelectorAll(".tab").forEach(b => b.addEventListener("click", () => {
+    metric = b.dataset.metric;
+    const u = new URL(location.href); u.searchParams.set("metric", metric); history_replace(u);
+    renderTabs(); renderHistoryChart();
+  }));
+}
+function history_replace(u) { window.history.replaceState(null, "", u); }
+
+async function loadHistory() {
+  const days = document.getElementById("rangeSelect").value;
+  history = await getJSON(`/api/inverter/history?days=${days}`);
+  document.getElementById("retentionNote").textContent = history.retention_days
+    ? `raw 30-second readings kept ${history.retention_days} days · daily summaries kept indefinitely`
+    : "raw readings kept indefinitely";
+  renderHistoryChart();
+  renderTable();
+  if (!selectedDay && history.days.length) selectedDay = history.days[history.days.length - 1].day;
+  if (selectedDay) loadDay(selectedDay);
+}
+
+function renderHistoryChart() {
+  const m = METRICS[metric];
+  const [kind, from] = m.src;
+  document.getElementById("metricTitle").innerHTML = `${m.title} ${src(kind, from)}`;
+  document.getElementById("metricDesc").innerHTML = m.desc;
+  const days = history ? history.days : [];
+  const labels = days.map(d => d.day);
+  const datasets = m.series.map(s => ({
+    label: s.label, data: days.map(s.value), borderColor: s.color,
+    backgroundColor: days.map(d => d.partial ? s.color + "55" : s.color + (m.type === "bar" ? "cc" : "")),
+    yAxisID: s.axis || "y", tension: 0.2, pointRadius: days.length > 60 ? 0 : 3, spanGaps: false,
+    type: s.axis ? "line" : m.type,
+  }));
+  if (m.nameplate && history && history.array_nameplate_w) {
+    datasets.push({ label: `Nameplate (${history.array_nameplate_w.toLocaleString()} W)`,
+      data: days.map(() => history.array_nameplate_w), borderColor: "#8b95ab", borderDash: [5, 5],
+      pointRadius: 0, type: "line", yAxisID: "y" });
+  }
+  const scales = {
+    x: { ticks: { color: "#8b95ab", maxTicksLimit: 14, callback: (v, i) => dayLabel(labels[i]) }, grid: { color: "#2a3450" } },
+    y: { beginAtZero: m.unit !== "V" && m.unit !== "°C", title: { display: true, text: m.unit, color: "#8b95ab" },
+         ticks: { color: "#8b95ab" }, grid: { color: "#2a3450" } },
+  };
+  if (m.series.some(s => s.axis === "y1")) {
+    scales.y1 = { position: "right", beginAtZero: true, ticks: { color: "#8b95ab", precision: 0 }, grid: { drawOnChartArea: false } };
+  }
+  if (historyChart) historyChart.destroy();
+  historyChart = new Chart(document.getElementById("historyChart"), {
+    type: m.type, data: { labels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: "index", intersect: false },
+      onClick: (e, els) => { if (els.length) loadDay(labels[els[0].index]); },
+      scales,
+      plugins: {
+        legend: { labels: { color: "#e6ebf5" } },
+        tooltip: { callbacks: {
+          title: items => items.length ? dayLabel(labels[items[0].dataIndex]) : "",
+          footer: items => items.length && days[items[0].dataIndex].partial ? "Partial day (*13)" : "",
+        } },
+      },
+    },
+  });
+}
+
+function coverageBadge(d) {
+  if (d.se_coverage_pct == null) return "—";
+  const cls = d.se_coverage_pct >= 95 ? "ok" : (d.se_coverage_pct >= 70 ? "warn" : "bad");
+  const missing = d.se_missing_minutes ? ` <span class="muted">(${fmtAge(d.se_missing_minutes)} missing)</span>` : "";
+  return `<span class="badge ${cls}">${fmt(d.se_coverage_pct)}%</span>${missing}`;
+}
+
+function renderTable() {
+  const tz = history.timezone;
+  const rows = [...history.days].reverse();
+  document.querySelector("#dayTable tbody").innerHTML = rows.length ? rows.map(d => {
+    const pct = readPct(d);
+    const readCls = pct == null ? "muted" : (pct >= 90 ? "ok" : (pct >= 50 ? "warn" : "bad"));
+    const notes = [
+      d.finalized ? "" : `<span class="badge muted">${d.day === rows[0].day ? "today" : "may still change"}</span>`,
+      d.partial ? `<span class="badge warn" title="${ACCURACY[13].short}">partial${acc(13)}</span>` : "",
+    ].join(" ");
+    return `<tr data-day="${d.day}" class="${d.day === selectedDay ? "selected" : ""}">
+      <td>${dayLabel(d.day)}</td>
+      <td class="num">${d.energy_wh == null ? "—" : (d.energy_wh / 1000).toFixed(2)}</td>
+      <td class="num">${fmt(d.peak_dc_w)} <span class="muted">${d.peak_at ? clock(d.peak_at, tz) : ""}</span></td>
+      <td class="num">${fmt(d.avg_dc_w)}</td>
+      <td class="num">${fmt(d.producing_hours, 1)}</td>
+      <td class="num">${d.min_ac_v == null ? "—" : `${fmt(d.min_ac_v, 1)}–${fmt(d.max_ac_v, 1)}`}</td>
+      <td class="num">${fmt(d.max_temp_c, 1)}</td>
+      <td class="num">${d.abnormal_samples ? `<span class="badge bad">${d.abnormal_samples}</span>` : "0"}</td>
+      <td class="num"><span class="badge ${readCls}">${pct == null ? "—" : pct + "%"}</span></td>
+      <td class="num">${coverageBadge(d)}</td>
+      <td>${notes}</td>
+    </tr>`;
+  }).join("") : `<tr><td colspan="11" class="empty">No inverter history yet — it builds up once Modbus is configured.</td></tr>`;
+  document.querySelectorAll("#dayTable tbody tr[data-day]").forEach(tr =>
+    tr.addEventListener("click", () => loadDay(tr.dataset.day)));
+}
+
+async function loadDay(day) {
+  selectedDay = day;
+  const u = new URL(location.href); u.searchParams.set("day", day); history_replace(u);
+  document.querySelectorAll("#dayTable tbody tr").forEach(tr =>
+    tr.classList.toggle("selected", tr.dataset.day === day));
+  let d;
+  try { d = await getJSON(`/api/inverter/day?date=${day}`); } catch (e) { return; }
+  const s = d.summary || {};
+  const tz = d.timezone;
+  document.getElementById("dayTitle").innerHTML = `${dayLabel(day)} — power curve ${src("inv")}`;
+  document.getElementById("dayBadges").innerHTML = s.partial
+    ? `<span class="badge warn">partial day${acc(13)}</span>` : "";
+  document.getElementById("dayChips").innerHTML = d.series.length ? `
+    <span>Energy${acc(7)} <b>${s.energy_wh == null ? "—" : (s.energy_wh / 1000).toFixed(2) + " kWh"}</b></span>
+    <span>Peak${acc(6)} <b>${fmt(s.peak_dc_w)} W</b> <span class="muted">at ${clock(s.peak_at, tz)}</span></span>
+    <span>Avg while producing${acc(12)} <b>${fmt(s.avg_dc_w)} W</b></span>
+    <span>Producing <b>${fmt(s.producing_hours, 1)} h</b> <span class="muted">${clock(s.first_producing_at, tz)}–${clock(s.last_producing_at, tz)}</span></span>
+    <span>Readings <b>${s.reads_ok ?? 0}</b> <span class="muted">· ${s.reads_failed ?? 0} failed</span></span>
+    <span>Per-panel data ${src("se")} ${coverageBadge(s)}</span>` : "";
+  document.getElementById("dayNote").textContent = d.series.length ? "" :
+    "No raw readings for this day — either Modbus wasn't reading then, or they're older than the retention period (the daily summary above is kept regardless).";
+
+  const pts = key => d.series.map(r => ({ x: new Date(r.at).getTime(), y: r[key] }));
+  const data = { datasets: [
+    { label: "DC power (W)", data: pts("dc"), borderColor: "#4f8cff", pointRadius: 0, borderWidth: 1.5, spanGaps: 10 * 60 * 1000, yAxisID: "y" },
+    { label: "AC power (W)", data: pts("ac"), borderColor: "#2ecc71", pointRadius: 0, borderWidth: 1, spanGaps: 10 * 60 * 1000, yAxisID: "y", hidden: true },
+    { label: "Grid AC voltage (V)", data: pts("ac_v"), borderColor: "#e5484d", pointRadius: 0, borderWidth: 1, spanGaps: 10 * 60 * 1000, yAxisID: "y1", hidden: true },
+    { label: "Heatsink (°C)", data: pts("temp"), borderColor: "#f5a623", pointRadius: 0, borderWidth: 1, spanGaps: 10 * 60 * 1000, yAxisID: "y1", hidden: true },
+  ]};
+  const first = d.series.find(r => (r.dc || 0) > 0), last = [...d.series].reverse().find(r => (r.dc || 0) > 0);
+  const xMin = first ? new Date(first.at).getTime() - 3600e3 : undefined;
+  const xMax = last ? new Date(last.at).getTime() + 3600e3 : undefined;
+  if (dayChart) dayChart.destroy();
+  dayChart = new Chart(document.getElementById("dayChart"), {
+    type: "line", data,
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false, parsing: false,
+      interaction: { mode: "nearest", axis: "x", intersect: false },
+      scales: {
+        x: { type: "linear", min: xMin, max: xMax, ticks: { color: "#8b95ab", maxTicksLimit: 12, callback: v => clock(new Date(v).toISOString(), tz) }, grid: { color: "#2a3450" } },
+        y: { beginAtZero: true, title: { display: true, text: "W", color: "#8b95ab" }, ticks: { color: "#8b95ab" }, grid: { color: "#2a3450" } },
+        y1: { display: "auto", position: "right", title: { display: true, text: "V / °C", color: "#8b95ab" }, ticks: { color: "#8b95ab" }, grid: { drawOnChartArea: false } },
+      },
+      plugins: {
+        legend: { labels: { color: "#e6ebf5" } },
+        tooltip: { callbacks: { title: items => items.length ? clock(new Date(items[0].parsed.x).toISOString(), tz) : "" } },
+      },
+    },
+  });
+}
+
+document.getElementById("srcLegend").innerHTML = srcLegend();
+document.getElementById("accKeyHolder").innerHTML = accKey([2, 6, 7, 12, 13]);
+fillMarkers();
+document.getElementById("rangeSelect").addEventListener("change", loadHistory);
+renderTabs();
+loadHistory();
+</script>
+</body>
+</html>

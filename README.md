@@ -20,6 +20,14 @@ the roof.
 - **Live inverter data over Modbus** — AC/DC power, status, lifetime energy —
   independent of SolarEdge's cloud, plus a measure of how far behind the
   cloud upload is running.
+- **365 days of inverter history** (configurable), with a per-day summary
+  kept indefinitely: energy, peak and average power, grid voltage,
+  temperature, throttling/fault readings, and how complete each day's
+  per-panel data was. Click any day for its full power curve.
+- **365 days of per-panel history**: each panel's daily energy (measured,
+  and an estimate that adds up to the inverter's total), output vs peers
+  and data coverage, in a panels × days grid for spotting a panel that
+  drifts down over weeks.
 - Every number on the dashboard is tagged with where it came from (inverter,
   SolarEdge, or computed) and flagged when it may not be exact, and live
   flags say when either source can't currently be trusted — for example

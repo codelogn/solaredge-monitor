@@ -4,40 +4,45 @@ Implemented in `src/analysis.py`, exposed at `/api/health` and `/api/hourly`.
 The goal is to decide which optimizers/panels are worth investigating — and,
 just as importantly, to avoid confidently accusing a healthy one.
 
-## What is compared: interval energy in 15-minute windows
+## What is compared: average power in 15-minute windows
 
-Until 2026-09-25 each poll's instantaneous `power` snapshots were compared.
-Two measurements on the live site showed that was the wrong signal:
+Each FRESH measurement is filed into a **15-minute window by its measurement
+time** (`ts_utc`), never by when we polled — SolarEdge delivers minutes to
+5+ hours late. An optimizer's value for a window is the **mean power of all
+its readings in it** (typically ~3), and that is compared with its group's
+median for the same window.
 
-- **Snapshots under moving cloud aren't comparable.** Each optimizer reports
-  on its own schedule, so two readings a minute apart can see different
-  skies. To stay fair the old method discarded most cycles — 912 of ~1,300
-  in one three-day range — for readings taken too far apart or light
-  changing too fast.
-- **About 8% of daytime snapshots are 0 W glitches**: 0 A at open-circuit
-  voltage (~40 V) while the inverter is in MPPT at ~1 kW. They are not
-  clustered in time, and the optimizer's own interval energy for those
-  moments equals its neighbours' (median ratio 1.00, n=202). No energy is
-  lost; the snapshot is just wrong.
+**Why windows, not single polls.** Each optimizer reports on its own 3–6
+minute schedule, so the readings returned by one poll were taken minutes
+apart. Comparing them forced the original method to discard most cycles —
+912 of ~1,300 in one three-day range — as "not measured together" or "light
+changing too fast". Averaging each panel's readings over a shared 15-minute
+window needs neither filter.
 
-`energy_wh` (SolarEdge's `total_last_telemetry_energy_WH`) integrates over
-a roughly **fixed ~15-minute trailing window** — it does not grow with the
-gap between reports (tested at 1–10 minute gaps). So:
+**Every reading is kept, including near-zero ones.** Readings near 0 A are
+common — 4% to 27% of daylight readings per panel on the development site,
+mostly with the panel at open-circuit voltage. They look like glitches, and
+an earlier version of this method treated them as such. Checked against the
+inverter's own DC power over Modbus, they are real: over 27 good-light
+windows with every optimizer reporting, the sum of the per-window averages
+came to **1.04×** the inverter's DC power (optimizers measure panel power
+before their own small losses, so ~1.01–1.03 is ideal). Filtering the
+near-zero readings moved it away every time:
 
-1. Every FRESH measurement is filed into a **15-minute window by its
-   measurement time** (`ts_utc`), never by when we polled — SolarEdge
-   delivers minutes to 5+ hours late.
-2. Each optimizer's value for the window is the **mean** of its `energy_wh`
-   reports in it (mean, not sum, so an extra report isn't extra output).
-3. That value is compared to its group's median for the same window.
+| Rule | Optimizers ÷ inverter |
+|---|---|
+| Keep every reading | **1.04** |
+| Drop exact 0 W | 1.07 |
+| Drop < 0.2 A at open-circuit voltage | 1.13 |
+| Drop readings far below the optimizer's own reported energy | 1.18 |
 
-Two panels reporting a few minutes apart cover nearly the same 15 minutes of
-sky, so no light-stability or simultaneity filter is needed.
-
-**`energy_wh`'s absolute scale is not Wh.** Because the windows overlap,
-summing it across reports gave 4.34× the inverter's AC energy. It is only
-ever used relatively. For absolute energy use the inverter's Modbus
-`lifetime_wh`.
+**SolarEdge's per-report energy (`energy_wh`) is not used.** It covers
+overlapping windows, summed to 1.60× the inverter, and scattered about
+three times as much window-to-window as the power readings (CV 0.27 vs
+0.10) — which is how it misled the earlier version into calling real
+readings glitches. Both measures ranked panels almost identically
+(r = 0.93, same five weakest), so conclusions drawn under the earlier
+version stand.
 
 ## Panels are compared within their own model group
 
@@ -128,9 +133,16 @@ the source of two separate bugs:
 - reliability over all cycles docked every optimizer for going quiet after
   dark.
 
-**If you add a metric, scope it the same way.** The value stats are raw
-snapshots, so a 0 W daylight minimum is usually the telemetry glitch
-described above, not a dropout — check the verdict, which is energy-based.
+**If you add a metric, scope it the same way.**
+
+The value stats show **median**, not minimum: every panel genuinely touches
+~0 A at some point, so the minimum was 0 for 13 of 20 panels and told them
+apart not at all. Alongside it, **near 0** is the share of daylight readings
+below 0.2 A (`NEAR_ZERO_A`) — how much of the good-light time a panel spent
+producing almost nothing. It leans higher on weaker panels, but only
+moderately (r = −0.53 against vs Peers on the development site, where
+panels producing above their group median still ranged 4–21%), so it's
+supporting evidence, not a verdict.
 
 ## Confidence is not decoration
 

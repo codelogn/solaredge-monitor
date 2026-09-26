@@ -17,7 +17,7 @@ from __future__ import annotations
 import bisect
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
@@ -26,7 +26,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from src import analysis, modbus_client  # noqa: E402
+from src import analysis, daily, inverter_stats, modbus_client, panel_daily  # noqa: E402
 from src.config import Config  # noqa: E402
 
 cfg = Config.load()
@@ -432,8 +432,10 @@ def inverter():
         })
 
     current_delay = next((d["minutes"] for d in reversed(delay)), None) if delay else None
-    peak = max(inv, key=lambda r: r["dc_power"] or 0) if inv else None
-    lifetimes = [r["lifetime_wh"] for r in inv if r["lifetime_wh"]]
+    # Today's figures use the same definitions as the stored daily history
+    # (src/inverter_stats.py), so today never changes meaning at midnight.
+    with _connect() as conn:
+        today = daily.compute_day(conn, midnight.date(), tz, is_today=True) or {}
 
     # For the data-health flags: how old the newest SolarEdge measurement is
     # regardless of production (the chart series blanks it after dark), and
@@ -468,14 +470,130 @@ def inverter():
         "modbus_interval_seconds": cfg.modbus_interval_seconds,
         "reads_last_hour": reads_1h,
         "failures_last_hour": fails_1h,
-        "today_peak_dc_w": peak["dc_power"] if peak else None,
-        "today_peak_at": peak["fetched_at"] if peak else None,
-        "today_energy_wh": (lifetimes[-1] - lifetimes[0]) if lifetimes else None,
+        "today_peak_dc_w": today.get("peak_dc_w"),
+        "today_peak_at": today.get("peak_at"),
+        "today_energy_wh": today.get("energy_wh"),
+        "today_avg_dc_w": today.get("avg_dc_w"),
+        "today_producing_hours": today.get("producing_hours"),
+        "today_first_producing_at": today.get("first_producing_at"),
+        "today_partial": bool(today.get("partial")),
         "cloud_delay_minutes": current_delay,
         "cloud_backlogged": current_delay is not None and current_delay > BACKLOG_MINUTES,
         "backlog_threshold_minutes": BACKLOG_MINUTES,
         "series": [{"at": r["fetched_at"], "dc": r["dc_power"], "ac": r["ac_power"]} for r in inv],
         "delay_series": delay,
+    }
+
+
+@app.get("/api/inverter/history")
+def inverter_history(days: int = 365):
+    """One row per site-local day from inverter_daily (kept indefinitely),
+    with today recomputed live so it's never up to an hour stale."""
+    tz = ZoneInfo(cfg.site_timezone)
+    today = datetime.now(tz).date()
+    since = (today - timedelta(days=max(1, days) - 1)).isoformat()
+    with _connect() as conn:
+        try:
+            rows = {r["day"]: dict(r) for r in conn.execute(
+                "SELECT * FROM inverter_daily WHERE day >= ? ORDER BY day", (since,))}
+        except sqlite3.OperationalError:     # poller hasn't created the table yet
+            rows = {}
+        live = daily.compute_day(conn, today, tz, is_today=True)
+    if live:
+        rows[today.isoformat()] = {"day": today.isoformat(), "finalized": 0, **live}
+    return {
+        "timezone": cfg.site_timezone,
+        "array_nameplate_w": cfg.array_nameplate_w or None,
+        "retention_days": cfg.inverter_retention_days,
+        "days": [rows[k] for k in sorted(rows)],
+    }
+
+
+def _panel_days(conn, since: str, serial: str | None = None) -> dict[str, dict[str, dict]]:
+    """{day: {serial: figures}} from panel_daily, with today computed live."""
+    tz = ZoneInfo(cfg.site_timezone)
+    today = datetime.now(tz).date()
+    out: dict[str, dict[str, dict]] = {}
+    try:
+        q = "SELECT * FROM panel_daily WHERE day >= ?" + (" AND serial = ?" if serial else "")
+        for r in conn.execute(q, (since, serial) if serial else (since,)):
+            if r["serial"] not in cfg.decommissioned:
+                out.setdefault(r["day"], {})[r["serial"]] = dict(r)
+    except sqlite3.OperationalError:          # poller hasn't created the table yet
+        pass
+    inv_today = daily.compute_day(conn, today, tz, is_today=True) or {}
+    energy = inv_today.get("energy_wh") if not inv_today.get("partial") else None
+    live = panel_daily.compute_day(conn, today, tz, cfg.decommissioned, energy)
+    if serial:
+        live = {k: v for k, v in live.items() if k == serial}
+    if live:
+        out[today.isoformat()] = {k: {"day": today.isoformat(), "serial": k, "finalized": 0, **v}
+                                  for k, v in live.items()}
+    return out
+
+
+@app.get("/api/optimizers/{serial}/daily")
+def optimizer_daily(serial: str, days: int = 365):
+    """One row per day for one optimizer: measured and estimated energy,
+    coverage, average/peak power, near-0 share, vs peers."""
+    tz = ZoneInfo(cfg.site_timezone)
+    since = (datetime.now(tz).date() - timedelta(days=max(1, days) - 1)).isoformat()
+    with _connect() as conn:
+        per_day = _panel_days(conn, since, serial)
+    return {
+        "serial": serial,
+        "timezone": cfg.site_timezone,
+        "retention_days": cfg.optimizer_retention_days,
+        "days": [per_day[d][serial] for d in sorted(per_day) if serial in per_day[d]],
+    }
+
+
+@app.get("/api/panels/daily")
+def panels_daily(days: int = 30):
+    """Every optimizer's daily figures over a range — the panel comparison page."""
+    tz = ZoneInfo(cfg.site_timezone)
+    since = (datetime.now(tz).date() - timedelta(days=max(1, days) - 1)).isoformat()
+    with _connect() as conn:
+        per_day = _panel_days(conn, since)
+        opts = [dict(r) for r in conn.execute("SELECT serial, label, panel_model FROM optimizers")
+                if r["serial"] not in cfg.decommissioned]
+        try:
+            inv = {r["day"]: dict(r) for r in conn.execute(
+                "SELECT day, energy_wh, partial, se_coverage_pct FROM inverter_daily WHERE day >= ?", (since,))}
+        except sqlite3.OperationalError:
+            inv = {}
+    return {
+        "timezone": cfg.site_timezone,
+        "retention_days": cfg.optimizer_retention_days,
+        "optimizers": opts,
+        "days": sorted(per_day),
+        "values": per_day,
+        "inverter": inv,
+    }
+
+
+@app.get("/api/inverter/day")
+def inverter_day(date: str):
+    """Every inverter reading for one site-local day (while raw readings are
+    retained), stale snapshots removed, plus that day's summary."""
+    tz = ZoneInfo(cfg.site_timezone)
+    try:
+        day = datetime.strptime(date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(422, "date must be YYYY-MM-DD")
+    with _connect() as conn:
+        rows, baseline = daily.day_readings(conn, day, tz)
+        summary = daily.compute_day(conn, day, tz, is_today=(day == datetime.now(tz).date()))
+    rows = inverter_stats.drop_stale(rows, floor=(baseline or {}).get("lifetime_wh") or 0)
+    return {
+        "date": date,
+        "timezone": cfg.site_timezone,
+        "summary": summary,
+        "series": [
+            {"at": r["fetched_at"], "dc": r["dc_power"], "ac": r["ac_power"],
+             "ac_v": r["ac_voltage"], "temp": r["temperature"], "status": r["status"]}
+            for r in rows
+        ],
     }
 
 

@@ -36,6 +36,12 @@ class Config:
     modbus_interval_seconds: int
     # Optional total panel rating (W), shown beside today's peak. 0 = unset.
     array_nameplate_w: int
+    # Days of raw 30-second inverter readings to keep. The per-day summary
+    # (inverter_daily) is kept forever regardless. 0 = keep everything.
+    inverter_retention_days: int
+    # Days of raw per-optimizer readings to keep. The per-panel daily
+    # summary (panel_daily) is kept forever regardless. 0 = keep everything.
+    optimizer_retention_days: int
     # Optimizers physically removed/replaced. They remain in SolarEdge's
     # layout forever and would otherwise sit at the bottom of every report
     # as NO DATA, hiding real faults behind known-dead hardware.
@@ -64,6 +70,8 @@ class Config:
             inverter_port=int(os.environ.get("INVERTER_MODBUS_PORT", "1502")),
             modbus_interval_seconds=int(os.environ.get("MODBUS_INTERVAL_SECONDS", "30")),
             array_nameplate_w=int(os.environ.get("ARRAY_NAMEPLATE_W", "0") or 0),
+            inverter_retention_days=int(os.environ.get("INVERTER_RETENTION_DAYS", "365") or 0),
+            optimizer_retention_days=int(os.environ.get("OPTIMIZER_RETENTION_DAYS", "365") or 0),
             decommissioned=frozenset(
                 s.strip() for s in os.environ.get("DECOMMISSIONED_SERIALS", "").split(",")
                 if s.strip()

@@ -67,6 +67,52 @@ were read in.
 `poll_cycles` is kept out of `readings`: our connectivity problems must never
 look like inverter data.
 
+### `inverter_daily` — one row per site-local day, kept indefinitely
+
+Rolled up from `inverter_readings` by `src/daily.py`, using the definitions
+in `src/inverter_stats.py` — the same code that computes the dashboard's
+"today" cards, so a day's figures don't change meaning at midnight.
+
+| Column | Meaning |
+|---|---|
+| `energy_wh` | Rise in the inverter's lifetime counter across the day. Starts from the last reading before midnight when that's within 12 h, so production before the day's first successful read isn't lost |
+| `peak_dc_w`, `peak_at` | Highest DC reading captured |
+| `avg_dc_w` | Time-weighted DC power while producing (≥50 W); intervals over 10 min without a read are skipped, not interpolated |
+| `producing_hours`, `first/last_producing_at` | First to last reading ≥50 W |
+| `min_ac_v`, `max_ac_v`, `max_temp_c` | While producing |
+| `abnormal_samples` | Readings with SunSpec status 5 (throttled) or 7 (fault) |
+| `reads_ok`, `reads_failed` | Modbus reads that succeeded / failed after retries |
+| `se_coverage_pct`, `se_missing_minutes` | Share of producing 15-min windows with SolarEdge per-panel data from ≥ half the optimizers, and the producing time without it |
+| `partial` | Modbus didn't see the start or end of production — energy and averages undercount |
+| `finalized` | Set once a day is 2+ days old; finalized days are never recomputed |
+
+The poller refreshes non-finalized days at startup and hourly, then prunes
+`inverter_readings` and `modbus_failures` older than
+`INVERTER_RETENTION_DAYS` (default 365). Summaries always exist before raw
+data can be pruned, and the summary table itself is never pruned.
+
+### `panel_daily` — one row per optimizer per site-local day, kept indefinitely
+
+Rolled up from `readings` by `src/panel_daily.py`, after the inverter roll-up
+(it needs that day's inverter energy). Primary key `(day, serial)`.
+
+| Column | Meaning |
+|---|---|
+| `measured_wh` | The optimizer's own power readings integrated over the time they cover; gaps over 15 min are skipped. Exact for what SolarEdge delivered, short when stretches never arrived |
+| `estimated_wh` | The inverter's day energy split in proportion to `measured_wh`, so all panels add up to the inverter's total. NULL when the inverter day is `partial`. Assumes each panel's share in undelivered hours matched delivered ones |
+| `coverage_pct` | Share of the day's producing 15-min windows with this optimizer's readings. "Producing" is the union of what the inverter and the optimizers saw, so neither source's gaps distort it |
+| `avg_power_w`, `peak_w`, `peak_at`, `near_zero_pct` | Over the producing windows |
+| `vs_peers_pct` | The day's median of the dashboard's per-window vs-peers ratio |
+| `readings`, `finalized`, `updated_at` | As for `inverter_daily` |
+
+On a complete day the panels' `measured_wh` total came within ~10% of the
+inverter (DC before conversion losses vs AC after); `estimated_wh` matches
+it by construction.
+
+Raw `readings` older than `OPTIMIZER_RETENTION_DAYS` (default 365) are
+deleted after the roll-up; `panel_daily` is never pruned. `poll_cycles` is
+kept (720 small rows a day).
+
 ## The two timestamps
 
 Confusing these is the most common mistake when reading this data.
@@ -102,7 +148,9 @@ measurements. The other 180 were the same reading served again.
 
 ## Growth
 
-~26 optimizers x 720 cycles/day ≈ 19k rows/day ≈ **4 MB/day**.
+~26 optimizers x 720 cycles/day ≈ 19k rows/day ≈ **4–5 MB/day**, so about
+**1.8–2 GB** at the default 365-day retention. Daily summaries add a few
+hundred KB a year.
 
 ## Changing the schema
 

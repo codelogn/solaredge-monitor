@@ -107,6 +107,56 @@ CREATE TABLE IF NOT EXISTS modbus_failures (
     reason      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_modbus_failures_at ON modbus_failures(occurred_at);
+
+-- One row per site-local day, derived from inverter_readings by
+-- src/daily.py (definitions in src/inverter_stats.py). Kept indefinitely,
+-- so history outlives INVERTER_RETENTION_DAYS of raw 30-second readings.
+-- finalized = 1 once the day is old enough that late data can't change it.
+CREATE TABLE IF NOT EXISTS inverter_daily (
+    day                 TEXT PRIMARY KEY,   -- YYYY-MM-DD, site-local
+    energy_wh           INTEGER,
+    peak_dc_w           REAL,
+    peak_at             TEXT,
+    avg_dc_w            REAL,
+    producing_hours     REAL,
+    first_producing_at  TEXT,
+    last_producing_at   TEXT,
+    max_temp_c          REAL,
+    min_ac_v            REAL,
+    max_ac_v            REAL,
+    abnormal_samples    INTEGER,
+    reads_ok            INTEGER,
+    reads_failed        INTEGER,
+    se_last_measured_at TEXT,   -- newest SolarEdge per-panel measurement taken that day
+    se_coverage_pct     REAL,   -- share of producing 15-min windows with per-panel data
+    se_missing_minutes  REAL,   -- producing time with no (or too little) per-panel data
+    partial             INTEGER NOT NULL DEFAULT 0,  -- Modbus didn't see the whole production day
+    finalized           INTEGER NOT NULL DEFAULT 0,
+    updated_at          TEXT NOT NULL
+);
+-- Per-panel completeness per day looks readings up by measurement time.
+CREATE INDEX IF NOT EXISTS idx_readings_ts ON readings(ts_utc);
+
+-- One row per optimizer per site-local day, from src/panel_daily.py. Kept
+-- indefinitely, so per-panel history outlives OPTIMIZER_RETENTION_DAYS of
+-- raw readings. See that module for measured vs estimated energy.
+CREATE TABLE IF NOT EXISTS panel_daily (
+    day            TEXT NOT NULL,   -- YYYY-MM-DD, site-local
+    serial         TEXT NOT NULL,
+    measured_wh    REAL,            -- own readings integrated over delivered time
+    estimated_wh   REAL,            -- inverter's day energy split by measured share
+    coverage_pct   REAL,            -- producing 15-min windows with this panel's data
+    avg_power_w    REAL,
+    peak_w         REAL,
+    peak_at        TEXT,
+    near_zero_pct  REAL,
+    vs_peers_pct   REAL,
+    readings       INTEGER,
+    finalized      INTEGER NOT NULL DEFAULT 0,
+    updated_at     TEXT NOT NULL,
+    PRIMARY KEY (day, serial)
+);
+CREATE INDEX IF NOT EXISTS idx_panel_daily_serial ON panel_daily(serial, day);
 """
 
 
@@ -235,6 +285,80 @@ def insert_readings(db_path: Path, cycle_id: int, readings: list[dict]) -> None:
             [{**r, "cycle_id": cycle_id, "fetched_at": now} for r in readings],
         )
         conn.commit()
+
+
+DAILY_COLUMNS = (
+    "energy_wh", "peak_dc_w", "peak_at", "avg_dc_w", "producing_hours",
+    "first_producing_at", "last_producing_at", "max_temp_c", "min_ac_v",
+    "max_ac_v", "abnormal_samples", "reads_ok", "reads_failed",
+    "se_last_measured_at", "se_coverage_pct", "se_missing_minutes", "partial", "finalized",
+)
+
+
+def upsert_inverter_daily(db_path: Path, day: str, values: dict) -> None:
+    cols = ", ".join(DAILY_COLUMNS)
+    marks = ", ".join("?" for _ in DAILY_COLUMNS)
+    updates = ", ".join(f"{c}=excluded.{c}" for c in DAILY_COLUMNS)
+    with connect(db_path) as conn:
+        conn.execute(
+            f"""
+            INSERT INTO inverter_daily (day, {cols}, updated_at) VALUES (?, {marks}, ?)
+            ON CONFLICT(day) DO UPDATE SET {updates}, updated_at=excluded.updated_at
+            """,
+            (day, *(values.get(c) for c in DAILY_COLUMNS), _now()),
+        )
+        conn.commit()
+
+
+PANEL_DAILY_COLUMNS = (
+    "measured_wh", "estimated_wh", "coverage_pct", "avg_power_w", "peak_w",
+    "peak_at", "near_zero_pct", "vs_peers_pct", "readings",
+)
+
+
+def upsert_panel_daily(db_path: Path, day: str, figures: dict[str, dict], finalized: int) -> None:
+    cols = ", ".join(PANEL_DAILY_COLUMNS)
+    marks = ", ".join("?" for _ in PANEL_DAILY_COLUMNS)
+    updates = ", ".join(f"{c}=excluded.{c}" for c in PANEL_DAILY_COLUMNS)
+    now = _now()
+    with connect(db_path) as conn:
+        conn.executemany(
+            f"""
+            INSERT INTO panel_daily (day, serial, {cols}, finalized, updated_at)
+            VALUES (?, ?, {marks}, ?, ?)
+            ON CONFLICT(day, serial) DO UPDATE SET {updates},
+                finalized=excluded.finalized, updated_at=excluded.updated_at
+            """,
+            [(day, serial, *(f.get(c) for c in PANEL_DAILY_COLUMNS), finalized, now)
+             for serial, f in figures.items()],
+        )
+        conn.commit()
+
+
+def prune_optimizer_raw(db_path: Path, keep_days: int) -> int:
+    """Delete raw per-optimizer readings older than keep_days (by poll time,
+    as every range query here is). panel_daily is never pruned."""
+    with connect(db_path) as conn:
+        n = conn.execute(
+            "DELETE FROM readings WHERE fetched_at < strftime('%Y-%m-%dT%H:%M:%SZ','now', ?)",
+            (f"-{int(keep_days)} days",)).rowcount
+        conn.commit()
+    return n
+
+
+def prune_inverter_raw(db_path: Path, keep_days: int) -> tuple[int, int]:
+    """Delete raw Modbus rows (and failure rows) older than keep_days. The
+    daily summary table is never pruned."""
+    cutoff = f"-{int(keep_days)} days"
+    with connect(db_path) as conn:
+        a = conn.execute(
+            "DELETE FROM inverter_readings "
+            "WHERE fetched_at < strftime('%Y-%m-%dT%H:%M:%SZ','now', ?)", (cutoff,)).rowcount
+        b = conn.execute(
+            "DELETE FROM modbus_failures "
+            "WHERE occurred_at < strftime('%Y-%m-%dT%H:%M:%SZ','now', ?)", (cutoff,)).rowcount
+        conn.commit()
+    return a, b
 
 
 def latest_inverter_lifetime(db_path: Path) -> int | None:

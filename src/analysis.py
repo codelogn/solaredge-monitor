@@ -9,23 +9,26 @@ optimizer is expressed as a ratio of its peers' median in that window, and
 the ratios are aggregated with a median again, so one odd window can't swing
 the verdict.
 
-What is compared is each optimizer's reported *interval energy*
-(`energy_wh`), not its instantaneous power snapshot. Measured on this site
-(2026-09-25):
-  - snapshot power is a single instant; under broken cloud, optimizers
-    sampled a minute apart see different skies, and ~8% of daytime
-    snapshots are 0 W glitches (0 A at open-circuit voltage) whose interval
-    energy is perfectly normal (median ratio 1.00 vs neighbours, n=202);
-  - energy_wh covers a roughly fixed trailing window (~15 min, independent
-    of the gap between reports), so it integrates over cloud and two panels
-    reporting a few minutes apart cover nearly the same sky.
-The old snapshot method had to throw most cycles away for being measured
-too far apart or under changing light (912 of ~1,300 in one 3-day run);
-energy windows need neither filter.
-
-energy_wh's absolute scale is not Wh (summed across reports it was 4.34x the
-inverter's AC energy, because the windows overlap), so it is only ever used
-relatively here.
+What is compared is each optimizer's AVERAGE POWER over all of its reports
+in a 15-minute window — every reading kept, none filtered. Checked against
+the inverter's own DC power over Modbus (2026-09-26, 27 good-light windows
+with all 20 optimizers reporting), the sum of those per-window averages came
+to 1.04x the inverter's DC power (optimizers measure panel power, before
+their own small losses, so ~1.01-1.03 is ideal):
+  - Readings near 0 A are common (4-27% of daylight readings per panel) and
+    are REAL. Every attempt to filter them out pushed the total away from
+    the inverter — dropping only exact 0 W gave 1.07x, dropping <0.2 A at
+    open-circuit voltage 1.13x. They're genuine moments of near-zero
+    output, and shaded panels spend more time there.
+  - SolarEdge's per-report energy (energy_wh) is NOT used: summed, it came
+    to 1.60x the inverter with ~3x the window-to-window scatter (CV 0.27 vs
+    0.10), so it misjudges which readings are real. (An earlier version
+    scored on it and called the near-zero readings glitches. Both methods
+    rank panels almost identically — r=0.93 — so conclusions held.)
+Windows rather than single polls, because each optimizer reports on its own
+3-6 minute schedule: comparing one poll's snapshots forced the old method to
+discard most cycles as "not measured together" (912 of ~1,300 in one
+3-day run). Averaging ~3 reports per panel per window needs no such filter.
 
 Two independent failure modes are scored separately and then combined:
   reliability — does it report at all (in how many daylight windows)
@@ -53,8 +56,7 @@ from statistics import median
 from zoneinfo import ZoneInfo
 
 # Readings are compared within fixed windows of MEASUREMENT time. 15 min
-# gives each optimizer ~3 reports per window at its ~4.5 min cadence, and
-# matches the span energy_wh itself covers.
+# gives each optimizer ~3 reports per window at its 3-6 min cadence.
 WINDOW_SECONDS = 900
 
 # A window's median needs enough reporters to mean anything. Both an
@@ -64,10 +66,9 @@ WINDOW_SECONDS = 900
 MIN_REPORTERS_PER_CYCLE = 3
 MIN_WINDOW_COVERAGE = 0.5
 
-# Absolute floor on the window's median snapshot power, mainly so a range
-# containing only night can't calibrate its own "peak" down to a few watts
-# and start scoring darkness. In watts because energy_wh has no reliable
-# absolute scale.
+# Absolute floor on the window's median power, mainly so a range containing
+# only night can't calibrate its own "peak" down to a few watts and start
+# scoring darkness.
 MIN_SITE_MEDIAN_W = 20.0
 
 # Weak light. Uniform cloud is harmless: the median falls with everything
@@ -79,6 +80,13 @@ MIN_SITE_MEDIAN_W = 20.0
 # observed output keeps this correct across seasons, array sizes and
 # all-day overcast.
 STRONG_LIGHT_FRACTION = 0.40
+
+# Share of daylight readings below this current is reported as "near zero".
+# These readings are real (see module docstring). The share leans higher on
+# weaker panels but only moderately (r = -0.53 against vs-Peers on the
+# development site, where strong panels ranged 4-21%), so it's supporting
+# evidence, never a verdict on its own.
+NEAR_ZERO_A = 0.2
 
 # Spread between healthy panels on one roof is normal, so "full marks" is
 # awarded at 90% of the peer median rather than demanding 100%.
@@ -130,22 +138,20 @@ def _build_windows(fresh_rows: list, tz: ZoneInfo) -> dict[int, dict]:
     dusk and put the hour-of-day profile at the wrong sun position.
 
     Each FRESH row is a distinct measurement, so nothing is double counted.
-    A panel's value for the window is the MEAN of its reports in it, not the
-    sum, so one extra report in a window doesn't read as extra output.
+    A panel's value for the window is the MEAN power of its reports in it,
+    every reading included — near-zero ones are real (see module docstring).
     """
     windows: dict[int, dict] = {}
     for r in fresh_rows:
         windows.setdefault(_window_start(r["ts_utc"]), {"rows": []})["rows"].append(r)
 
     for start, w in windows.items():
-        energy: dict[str, list[float]] = {}
+        power: dict[str, list[float]] = {}
         for r in w["rows"]:
-            if r["energy_wh"] is not None:
-                energy.setdefault(r["optimizer_serial"], []).append(r["energy_wh"])
-        w["panel_energy"] = {s: sum(v) / len(v) for s, v in energy.items()}
-        w["median_energy"] = median(w["panel_energy"].values()) if energy else 0.0
-        powers = [r["power"] for r in w["rows"] if r["power"] is not None]
-        w["median_power"] = median(powers) if powers else 0.0
+            if r["power"] is not None:
+                power.setdefault(r["optimizer_serial"], []).append(r["power"])
+        w["panel_power"] = {s: sum(v) / len(v) for s, v in power.items()}
+        w["median_power"] = median(w["panel_power"].values()) if power else 0.0
         w["hour"] = datetime.fromtimestamp(start, tz).hour
     return windows
 
@@ -167,14 +173,14 @@ def _select_windows(windows: dict[int, dict], active: int, hour_of_day: int | No
     for start, w in windows.items():
         if hour_of_day is not None and w["hour"] != hour_of_day:
             continue
-        if len(w["panel_energy"]) < required:
+        if len(w["panel_power"]) < required:
             excluded_sparse += 1
             continue
         candidates[start] = w
 
     threshold = 0.0
     if candidates:
-        ordered = sorted(w["median_energy"] for w in candidates.values())
+        ordered = sorted(w["median_power"] for w in candidates.values())
         peak = ordered[int(0.9 * (len(ordered) - 1))]
         threshold = STRONG_LIGHT_FRACTION * peak
 
@@ -182,8 +188,7 @@ def _select_windows(windows: dict[int, dict], active: int, hour_of_day: int | No
     excluded_weak_light = 0
     for start in sorted(candidates):
         w = candidates[start]
-        if (w["median_power"] < MIN_SITE_MEDIAN_W or w["median_energy"] <= 0
-                or w["median_energy"] < threshold):
+        if w["median_power"] < MIN_SITE_MEDIAN_W or w["median_power"] < threshold:
             excluded_weak_light += 1
             continue
         scored.append(start)
@@ -254,7 +259,7 @@ def _load(db_path: Path, hours: int, decommissioned: frozenset):
             r for r in conn.execute(
                 """
                 SELECT cycle_id, optimizer_serial, status, ts_utc, power,
-                       voltage, current, energy_wh
+                       voltage, current
                 FROM readings
                 WHERE fetched_at > strftime('%Y-%m-%dT%H:%M:%SZ','now', ?)
                 """,
@@ -280,20 +285,20 @@ def score_optimizers(
     groups = {o["serial"]: o["panel_model"] for o in optimizers}
 
     windows = _build_windows(fresh, tz)
-    active = len({s for w in windows.values() for s in w["panel_energy"]})
+    active = len({s for w in windows.values() for s in w["panel_power"]})
     selection = _select_windows(windows, active, hour_of_day)
     scored_windows = set(selection["scored"])
 
     # Ratios and value stats are both accumulated here, over exactly the same
-    # windows. Computing min/max over all readings instead would make every
-    # optimizer's minimum ~0 W (its night value) and pull the averages around
-    # with the length of the night, so neither would be comparable.
+    # windows. Computing stats over all readings instead would include every
+    # optimizer's ~0 W night values and pull the averages around with the
+    # length of the night, so none would be comparable.
     ratios: dict[str, list[float]] = {}
     samples: dict[str, dict[str, list[float]]] = {}
     for start in selection["scored"]:
         w = windows[start]
-        refs = _group_medians(w["panel_energy"], groups)
-        for serial, value in w["panel_energy"].items():
+        refs = _group_medians(w["panel_power"], groups)
+        for serial, value in w["panel_power"].items():
             reference = _reference_median(serial, groups, refs)
             if reference > 0:
                 ratios.setdefault(serial, []).append(value / reference)
@@ -379,20 +384,25 @@ def score_optimizers(
             "verdict": verdict,
             "confidence": _confidence(len(my_ratios)),
             # All daylight-only — see the comment above the accumulation loop.
+            # Median rather than min: every panel genuinely touches ~0 A at
+            # some point, so the minimum was 0 for 13 of 20 panels and told
+            # them apart not at all. How OFTEN it's near zero does.
             "avg_power": _stat("power", _avg),
-            "min_power": _stat("power", min),
+            "median_power": _stat("power", median),
             "max_power": _stat("power", max),
             "avg_voltage": _stat("voltage", _avg),
-            "min_voltage": _stat("voltage", min),
+            "median_voltage": _stat("voltage", median),
             "max_voltage": _stat("voltage", max),
             "avg_current": _stat("current", _avg),
-            "min_current": _stat("current", min),
+            "median_current": _stat("current", median),
             "max_current": _stat("current", max),
+            "near_zero_pct": _stat(
+                "current", lambda v: round(100 * sum(1 for x in v if x < NEAR_ZERO_A) / len(v), 1)),
         })
 
     results.sort(key=lambda r: (r["health_score"], r["serial"]))
     return {
-        "method": "energy",
+        "method": "window_mean_power",
         "window_minutes": WINDOW_SECONDS // 60,
         "scored_windows": len(selection["scored"]),
         "reliability_cycles": len(reliability_cycles),
@@ -427,7 +437,7 @@ def hourly_profile(
     groups = {o["serial"]: o["panel_model"] for o in optimizers}
 
     windows = _build_windows(fresh, tz)
-    active = len({s for w in windows.values() for s in w["panel_energy"]})
+    active = len({s for w in windows.values() for s in w["panel_power"]})
 
     # Calibrate each hour against itself. Judging 8am against midday peak
     # would throw the morning away for being dim — and the early and late
@@ -446,8 +456,8 @@ def hourly_profile(
         scored_total += len(selection["scored"])
         for start in selection["scored"]:
             w = windows[start]
-            refs = _group_medians(w["panel_energy"], groups)
-            for serial, value in w["panel_energy"].items():
+            refs = _group_medians(w["panel_power"], groups)
+            for serial, value in w["panel_power"].items():
                 reference = _reference_median(serial, groups, refs)
                 if reference > 0:
                     buckets.setdefault(serial, {}).setdefault(hour, []).append(value / reference)

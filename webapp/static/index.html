@@ -52,6 +52,11 @@
   .errors-list div.row { padding: 6px 0; border-bottom: 1px solid var(--border); }
   .errors-list .ts { color: var(--muted); margin-right: 8px; }
   .empty { color: var(--muted); font-size: 13px; padding: 12px 0; }
+  a.card-link { color: inherit; text-decoration: none; display: block; position: relative; transition: border-color .15s; }
+  a.card-link:hover { border-color: var(--accent); }
+  .card-hint { position: absolute; right: 12px; bottom: 8px; font-size: 10px; color: var(--muted); opacity: 0; transition: opacity .15s; }
+  a.card-link:hover .card-hint { opacity: 1; }
+  @media (hover: none) { .card-hint { opacity: .7; } }
 </style>
 </head>
 <body>
@@ -65,7 +70,7 @@
   <section>
     <h2>
       <span>Inverter today — real time over your LAN &amp; cloud upload delay<span data-acc="9"></span></span>
-      <span class="muted" style="font-weight:400; font-size:12px;" id="invSampling"></span>
+      <span class="muted" style="font-weight:400; font-size:12px;"><span id="invSampling"></span> · <a href="inverter.html" style="color:var(--accent)">daily history →</a></span>
     </h2>
     <div class="cards" id="inverterCards" style="margin-bottom:12px;"></div>
     <div class="muted" style="font-size:12px; margin-bottom:10px; line-height:1.5;">
@@ -110,7 +115,8 @@
 
   <section>
     <h2>
-      <span>Health verdict <span data-src="calc" data-from="se"></span></span>
+      <span>Health verdict <span data-src="calc" data-from="se"></span>
+        <a href="panels.html" style="font-weight:400; font-size:12px; color:var(--accent); margin-left:8px">panel history →</a></span>
       <span>
         <select id="hourSelect" title="Restrict scoring to one hour of the day">
           <option value="">All daylight hours</option>
@@ -126,21 +132,21 @@
     </h2>
     <div id="seLagHealth"></div>
     <div class="muted" style="font-size:12px; margin-bottom:10px; line-height:1.5;">
-      <b>vs Peers</b> is this optimizer's reported <i>interval energy</i> as a % of the median of
-      its own <b>panel-model group</b> <i>in the same 15-minute window</i> — so sun angle and cloud
-      cancel out, and 100% means "producing like its neighbours". Energy rather than the instant
-      power snapshot, because snapshots taken a minute apart under moving cloud see different
-      skies, and occasional 0 W snapshots are telemetry glitches.
+      <b>vs Peers</b> is this optimizer's <i>average power over all its readings in a 15-minute
+      window</i>, as a % of the median of its own <b>panel-model group</b> in the same window — so
+      sun angle and cloud cancel out, and 100% means "producing like its neighbours". Every reading
+      counts, including near-zero ones: checked against the inverter's own DC power, those are real.
       <b>Score</b> multiplies output-vs-peers by reporting reliability, so neither problem can
       mask the other. Worst first.
       <br>
       <span id="cycleFilterNote">—</span>
       <br>
-      <b>☀ columns are daylight-only</b> — including night would pin every optimizer's
-      minimum at ~0 W and drag the averages toward zero, making them useless for comparison.
-      A 0 W minimum is <i>not</i> by itself a fault: optimizers commonly
-      reports 0 A at open-circuit voltage for one snapshot, yet its energy counter for that
-      interval is normal — a telemetry glitch, not lost production.
+      <b>☀ columns are daylight-only</b> — including night would drag every figure toward zero.
+      They show <b>median</b> rather than minimum: every panel genuinely touches ~0 A at some
+      point, so the minimum can't tell panels apart. <b>Near 0</b> is the share of daylight
+      readings under 0.2 A. It tends to be higher on weaker or shaded panels, but only loosely —
+      healthy panels can sit there 15–20% of the time — so treat it as supporting evidence next to
+      vs Peers and the hourly profile, not a verdict.
       <br>
       <b style="color:var(--warn)">Always check Confidence before acting</b> — a verdict from
       a handful of samples is noise. Low output can also mean shade from a tree or chimney
@@ -161,17 +167,18 @@
           <th colspan="3" class="grouphead from-calc">Power (W) ☀<span data-acc="3"></span></th>
           <th colspan="3" class="grouphead from-calc">Voltage (V) ☀<span data-acc="3"></span></th>
           <th colspan="3" class="grouphead from-calc">Current (A) ☀<span data-acc="3"></span></th>
+          <th rowspan="2" data-key="near_zero_pct" class="num from-calc" title="Share of daylight readings below 0.2 A">Near 0 ☀<span data-acc="3"></span></th>
           <th rowspan="2" data-key="scored_samples" class="from-calc">Confidence</th>
         </tr>
         <tr>
           <th data-key="avg_power" class="num sub from-calc">avg</th>
-          <th data-key="min_power" class="num sub from-calc">min</th>
+          <th data-key="median_power" class="num sub from-calc">median</th>
           <th data-key="max_power" class="num sub from-calc">max</th>
           <th data-key="avg_voltage" class="num sub from-calc">avg</th>
-          <th data-key="min_voltage" class="num sub from-calc">min</th>
+          <th data-key="median_voltage" class="num sub from-calc">median</th>
           <th data-key="max_voltage" class="num sub from-calc">max</th>
           <th data-key="avg_current" class="num sub from-calc">avg</th>
-          <th data-key="min_current" class="num sub from-calc">min</th>
+          <th data-key="median_current" class="num sub from-calc">median</th>
           <th data-key="max_current" class="num sub from-calc">max</th>
         </tr>
       </thead>
@@ -473,6 +480,13 @@ function pctBadge(pct, goodAt, warnAt) {
   return `<span class="badge ${cls}">${pct}%</span>`;
 }
 
+// Share of daylight readings near 0 A. High suggests shade, not a fault, so
+// it's amber rather than red.
+function nearZeroBadge(pct) {
+  if (pct == null) return `<span class="badge muted">—</span>`;
+  return `<span class="badge ${pct <= 10 ? "ok" : "warn"}" title="${pct}% of daylight readings under 0.2 A">${pct}%</span>`;
+}
+
 function renderSummary(rows) {
   const tbody = document.querySelector("#summaryTable tbody");
   if (!rows.length) {
@@ -492,14 +506,15 @@ function renderSummary(rows) {
       <td class="num muted">${r.fresh_count} / ${r.stale_count} / ${r.missing_count}</td>
       <td class="num">${pctBadge(r.reliability_pct, 90, 50)}</td>
       <td class="num">${fmt(r.avg_power, 1)}</td>
-      <td class="num">${fmt(r.min_power, 1)}</td>
+      <td class="num">${fmt(r.median_power, 1)}</td>
       <td class="num">${fmt(r.max_power, 1)}</td>
       <td class="num">${fmt(r.avg_voltage, 2)}</td>
-      <td class="num">${fmt(r.min_voltage, 2)}</td>
+      <td class="num">${fmt(r.median_voltage, 2)}</td>
       <td class="num">${fmt(r.max_voltage, 2)}</td>
       <td class="num">${fmt(r.avg_current, 3)}</td>
-      <td class="num">${fmt(r.min_current, 3)}</td>
+      <td class="num">${fmt(r.median_current, 3)}</td>
       <td class="num">${fmt(r.max_current, 3)}</td>
+      <td class="num">${nearZeroBadge(r.near_zero_pct)}</td>
       <td><span class="badge ${cCls}">${r.confidence}</span>
           <span class="muted" style="font-size:11px">${r.scored_samples}</span></td>
     </tr>`;
@@ -524,6 +539,12 @@ async function loadErrors() {
 }
 
 let inverterChart = null;
+
+// Inverter cards open the history page for their metric.
+function histCard(metric, inner) {
+  return `<a class="card card-link" href="inverter.html?metric=${metric}" title="Click for daily history">
+    ${inner}<div class="card-hint">history →</div></a>`;
+}
 
 async function loadInverter() {
   const cardsEl = document.getElementById("inverterCards");
@@ -556,26 +577,31 @@ async function loadInverter() {
     : `<span class="badge ${d.cloud_backlogged ? "bad" : "ok"}">${delay < 60 ? Math.round(delay) + " min" : (delay / 60).toFixed(1) + " h"}</span>`;
 
   cardsEl.innerHTML = `
-    <div class="card"><div class="label">DC Power now${acc(7)} ${src("inv")}</div>
+    ${histCard("power", `<div class="label">DC Power now${acc(7)} ${src("inv")}</div>
       <div class="value">${L ? Math.round(L.dc_power).toLocaleString() + " W" : "—"}</div>
-      <div class="sub">${L ? `AC ${Math.round(L.ac_power)} W · ${fmt(L.ac_voltage, 1)} V · ${timeAgo(L.fetched_at)}` : ""}</div></div>
-    <div class="card"><div class="label">Inverter Status ${src("inv")}</div>
+      <div class="sub">${L ? `AC ${Math.round(L.ac_power)} W · ${fmt(L.ac_voltage, 1)} V · ${timeAgo(L.fetched_at)}` : ""}</div>`)}
+    ${histCard("status", `<div class="label">Inverter Status ${src("inv")}</div>
       <div class="value"><span class="badge ${statusCls}">${d.latest_status_name ?? "—"}</span></div>
-      <div class="sub">${L ? `heatsink ${fmt(L.temperature, 1)} °C` : ""}</div></div>
-    <div class="card"><div class="label">Today's Peak${acc(6)} ${src("calc", "inv")}</div>
+      <div class="sub">${L ? `heatsink ${fmt(L.temperature, 1)} °C` : ""}</div>`)}
+    ${histCard("power", `<div class="label">Today's Peak${acc(6)} ${src("calc", "inv")}</div>
       <div class="value">${d.today_peak_dc_w ? Math.round(d.today_peak_dc_w).toLocaleString() + " W" : "—"}</div>
-      <div class="sub">${d.today_peak_at ? "at " + clock(d.today_peak_at) : ""}${d.array_nameplate_w ? ` · ${d.array_nameplate_w.toLocaleString()} W nameplate` : ""}</div></div>
-    <div class="card"><div class="label">Energy Today${acc(7)} ${src("calc", "inv")}</div>
-      <div class="value">${d.today_energy_wh !== null ? (d.today_energy_wh / 1000).toFixed(2) + " kWh" : "—"}</div>
-      <div class="sub">today's rise in the inverter's lifetime counter (AC)</div></div>
-    <div class="card"><div class="label">Modbus Reads (1h) ${src("calc")}</div>
+      <div class="sub">${d.today_peak_at ? "at " + clock(d.today_peak_at) : ""}${d.array_nameplate_w ? ` · ${d.array_nameplate_w.toLocaleString()} W nameplate` : ""}</div>`)}
+    ${histCard("power", `<div class="label">Avg DC Power${acc(12)} ${src("calc", "inv")}</div>
+      <div class="value">${d.today_avg_dc_w != null ? Math.round(d.today_avg_dc_w).toLocaleString() + " W" : "—"}</div>
+      <div class="sub">${d.today_avg_dc_w != null
+        ? `while producing today · ${fmt(d.today_producing_hours, 1)} h since ${clock(d.today_first_producing_at)}`
+        : "not producing yet today"}</div>`)}
+    ${histCard("energy", `<div class="label">Energy Today${acc(7)} ${src("calc", "inv")}</div>
+      <div class="value">${d.today_energy_wh != null ? (d.today_energy_wh / 1000).toFixed(2) + " kWh" : "—"}</div>
+      <div class="sub">today's rise in the inverter's lifetime counter (AC)${d.today_partial ? ` · <span style="color:var(--warn)">partial day${acc(13)}</span>` : ""}</div>`)}
+    ${histCard("modbus", `<div class="label">Modbus Reads (1h) ${src("calc")}</div>
       <div class="value"><span class="badge ${okCls}">${okPct === null ? "none" : okPct + "%"}</span></div>
-      <div class="sub">${reads} ok · ${fails} failed after retry</div></div>
-    <div class="card"><div class="label">Cloud Delay ${src("calc", "se")}</div>
+      <div class="sub">${reads} ok · ${fails} failed after retry</div>`)}
+    ${histCard("panels", `<div class="label">Cloud Delay ${src("calc", "se")}</div>
       <div class="value">${delayBadge}</div>
       <div class="sub">${d.cloud_backlogged
         ? "SolarEdge is receiving uploads late — per-panel data is lagging"
-        : (delay === null ? "inverter not producing, or no recent inverter read to confirm it" : "normal is ~2 min")}</div></div>
+        : (delay === null ? "inverter not producing, or no recent inverter read to confirm it" : "normal is ~2 min")}</div>`)}
   `;
 
   const pts = (rows, key) => rows.map(r => ({ x: new Date(r.at).getTime(), y: r[key] }));
@@ -622,7 +648,7 @@ attachSort("optimizersTable", () => lastOptimizers, renderOptimizers);
 attachSort("summaryTable", () => lastSummary, renderSummary);
 
 document.getElementById("srcLegend").innerHTML = srcLegend();
-document.getElementById("accKeyHolder").innerHTML = accKey([1, 2, 3, 4, 6, 7, 8, 9]);
+document.getElementById("accKeyHolder").innerHTML = accKey([1, 2, 3, 4, 6, 7, 8, 9, 12, 13]);
 fillMarkers();
 
 refreshAll();

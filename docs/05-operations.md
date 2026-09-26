@@ -23,6 +23,8 @@ cp .env.example .env                        # then fill in credentials
 | `INVERTER_MODBUS_HOST` / `INVERTER_MODBUS_PORT` | Inverter's LAN IP and `1502`; blank host disables Modbus |
 | `MODBUS_INTERVAL_SECONDS` | `30`. Local only — costs no SolarEdge requests. Runs on its own thread inside the poller (the inverter accepts one Modbus client at a time, so don't run a second reader alongside it) |
 | `DECOMMISSIONED_SERIALS` | Comma-separated serials of physically replaced optimizers, excluded from scoring |
+| `INVERTER_RETENTION_DAYS` | `365`. Days of raw 30-second inverter readings kept (~3,000 rows/day). Daily summaries are kept forever regardless; `0` keeps raw readings forever |
+| `OPTIMIZER_RETENTION_DAYS` | `365`. Days of raw per-optimizer readings kept (~19,000 rows / ~5 MB a day). Per-panel daily summaries are kept forever regardless; `0` keeps raw readings forever |
 | `ARRAY_NAMEPLATE_W` | Optional. Total panel rating in watts (e.g. 20 × 365 = `7300`); shown next to today's peak for comparison |
 
 Never commit `.env`, `session/cookies.json` or `data/` — all gitignored.

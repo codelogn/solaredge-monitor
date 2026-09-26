@@ -7,8 +7,8 @@ from datetime import datetime, timedelta, timezone
 
 from src import analysis, db
 
-# energy_wh is interval energy over a ~15 min trailing window, so on a
-# steady panel it tracks power. Only its relative size matters to scoring.
+# Rows carry a plausible energy_wh, but scoring deliberately ignores it —
+# it's compared on power (see src/analysis.py).
 E = 0.25
 
 
@@ -164,35 +164,40 @@ def test_night_cycles_are_excluded_from_scoring(tmp_path):
     assert res["C"]["perf_ratio_pct"] == 10.0
 
 
-def test_panels_are_compared_on_interval_energy_not_snapshot_power(tmp_path):
+def test_near_zero_readings_count_as_real_output(tmp_path):
     db_path = tmp_path / "t.db"
-    # Measured on the live site: optimizers occasionally report a 0 W
-    # snapshot (0 A at open-circuit voltage) while their interval energy is
-    # perfectly normal. GLITCHY does that in every other window; judged on
-    # snapshots it would look like a panel dropping out half the time.
+    # Checked against the inverter's own DC power, readings near 0 A are
+    # real: filtering them out pushed the optimizers' total 7-18% above what
+    # the inverter measured. A panel at 0 W in half its readings made half
+    # the output, whatever SolarEdge's per-report energy figure claims.
     db.init_db(db_path)
-    serials = ["A", "B", "C", "GLITCHY"]
+    serials = ["A", "B", "C", "DIPS"]
     db.upsert_optimizers(db_path, [{"serial": s, "label": s} for s in serials])
     for i in range(10):
         cid = db.start_cycle(db_path)
         rows = []
         for s in serials:
-            power = 0.0 if (s == "GLITCHY" and i % 2) else 200.0
-            rows.append({
-                "optimizer_serial": s, "status": "FRESH", "ts_utc": _ts(10, i),
-                "voltage": 40.0 if power == 0 else 38.0, "optimizer_voltage": 40.0,
-                "current": power / 38.0, "power": power,
-                "energy_wh": 200.0 * E, "raw_json": "{}",
-            })
+            for j, minute in enumerate((0, 5)):          # two reports per window
+                power = 0.0 if (s == "DIPS" and j == 1) else 200.0
+                rows.append({
+                    "optimizer_serial": s, "status": "FRESH",
+                    "ts_utc": (datetime(2026, 9, 23, 10, tzinfo=timezone.utc)
+                               + timedelta(seconds=i * analysis.WINDOW_SECONDS, minutes=minute)
+                               ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "voltage": 38.0, "optimizer_voltage": 40.0,
+                    "current": power / 38.0, "power": power,
+                    "energy_wh": 200.0 * E,             # energy says "normal" — ignored
+                    "raw_json": "{}",
+                })
         db.insert_readings(db_path, cid, rows)
         db.finish_cycle(db_path, cid, "OK")
 
     res = _by_serial(analysis.score_optimizers(db_path))
 
-    assert res["GLITCHY"]["perf_ratio_pct"] == 100.0
-    assert res["GLITCHY"]["verdict"] == "GOOD"
-    # The glitch snapshot is still visible in the raw value stats.
-    assert res["GLITCHY"]["min_power"] == 0.0
+    assert res["DIPS"]["perf_ratio_pct"] == 50.0
+    assert res["DIPS"]["near_zero_pct"] == 50.0
+    assert res["A"]["near_zero_pct"] == 0.0
+    assert res["DIPS"]["median_power"] == 100.0
 
 
 def test_uniform_cloud_does_not_distort_ratios(tmp_path):
@@ -228,15 +233,15 @@ def test_weak_light_cycles_are_not_scored(tmp_path):
     # A is only ever dim during the murk, which is excluded, so it is not
     # condemned on the strength of near-dark readings.
     assert res["A"]["verdict"] == "GOOD"
-    assert res["A"]["min_power"] == 300.0
+    assert res["A"]["median_power"] == 300.0
 
 
 def test_light_changing_between_windows_does_not_discard_them(tmp_path):
     db_path = tmp_path / "t.db"
     # Broken cloud: site output whipsaws between full sun and shade from one
     # window to the next. The snapshot method had to drop all of these (and
-    # dropped 912 real cycles in one run); comparing within each window's
-    # interval energy keeps them, and the ratios still hold.
+    # dropped 912 real cycles in one run); comparing each window's average
+    # power keeps them, and the ratios still hold.
     cycles = []
     for i in range(12):
         lvl = 300.0 if i % 2 == 0 else 150.0
@@ -593,7 +598,7 @@ def test_unreliable_reporting_drags_score_down(tmp_path):
     assert res["A"]["verdict"] == "GOOD"
 
 
-def test_min_max_power_captured(tmp_path):
+def test_median_max_power_captured(tmp_path):
     db_path = tmp_path / "t.db"
     _build(db_path, [
         {"A": 100.0, "B": 100.0, "C": 100.0},
@@ -603,16 +608,16 @@ def test_min_max_power_captured(tmp_path):
 
     res = _by_serial(analysis.score_optimizers(db_path))
 
-    assert res["A"]["min_power"] == 50.0
+    assert res["A"]["median_power"] == 100.0
     assert res["A"]["max_power"] == 150.0
     assert res["A"]["avg_power"] == 100.0
 
 
-def test_night_readings_excluded_from_min_max_and_averages(tmp_path):
+def test_night_readings_excluded_from_daylight_stats(tmp_path):
     db_path = tmp_path / "t.db"
     # Daytime: A runs 80-120 W. Night: everything collapses to ~0.3 W.
-    # Without daylight filtering, min_power would be 0.3 for every panel and
-    # the averages would be dragged toward zero — neither comparable.
+    # Without daylight filtering, the medians and averages would be dragged
+    # toward zero and every panel would read "near zero" all night.
     day = [{"A": 100.0, "B": 100.0, "C": 100.0},
            {"A": 80.0, "B": 100.0, "C": 100.0},
            {"A": 120.0, "B": 100.0, "C": 100.0}]
@@ -621,9 +626,10 @@ def test_night_readings_excluded_from_min_max_and_averages(tmp_path):
 
     res = _by_serial(analysis.score_optimizers(db_path))["A"]
 
-    assert res["min_power"] == 80.0     # not 0.3
+    assert res["median_power"] == 100.0  # not 0.3
     assert res["max_power"] == 120.0
-    assert res["avg_power"] == 100.0    # not dragged down by 10 night zeros
-    assert res["min_current"] == 80.0 / 38.0
-    assert res["min_voltage"] == 38.0   # night voltage never considered
+    assert res["avg_power"] == 100.0     # not dragged down by 10 night zeros
+    assert res["median_current"] == 100.0 / 38.0
+    assert res["median_voltage"] == 38.0 # night voltage never considered
+    assert res["near_zero_pct"] == 0.0   # night's ~0 A readings aren't counted
     assert res["scored_samples"] == 3
