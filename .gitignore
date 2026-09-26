@@ -1,0 +1,29 @@
+# Secrets — credentials live only in .env (see .env.example)
+.env
+.env.*
+!.env.example
+
+# Runtime state: database, logs, pid files, backups, captured API traffic.
+# All of it is specific to one installation and may contain site data.
+data/
+# SolarEdge login session cookies
+session/
+# Private notes about your own installation (never published)
+local/
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Screenshots / debug captures (login debugging renders account details)
+*.png
+*.jpg
+*.jpeg
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store

@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SolarMonitor — Optimizer History</title>
+<script src="chart.umd.min.js"></script>
+<link rel="stylesheet" href="sources.css">
+<script src="sources.js"></script>
+<style>
+  :root {
+    --bg: #0f1420; --panel: #161d2e; --panel-2: #1c2438; --border: #2a3450;
+    --text: #e6ebf5; --muted: #8b95ab; --accent: #4f8cff;
+    --ok: #2ecc71; --warn: #f5a623; --bad: #e5484d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    background: var(--bg); color: var(--text); padding: 24px; max-width: 1280px; margin: 0 auto;
+  }
+  a { color: var(--accent); text-decoration: none; font-size: 13px; }
+  a:hover { text-decoration: underline; }
+  h1 { font-size: 20px; margin: 10px 0 2px; }
+  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .card .value { font-size: 20px; font-weight: 600; margin-top: 4px; }
+  .card .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .badge.ok { background: rgba(46,204,113,0.15); color: var(--ok); }
+  .badge.warn { background: rgba(245,166,35,0.15); color: var(--warn); }
+  .badge.bad { background: rgba(229,72,77,0.15); color: var(--bad); }
+  .badge.muted { background: rgba(139,149,171,0.15); color: var(--muted); }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; margin-bottom: 20px; }
+  section h2 { font-size: 15px; margin: 0 0 12px; display: flex; align-items: center; justify-content: space-between; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; white-space: nowrap; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  select { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; font-size: 13px; }
+  .muted { color: var(--muted); }
+  .chart-wrap { height: 320px; }
+  .scroll-table { max-height: 520px; overflow-y: auto; }
+  .scroll-table thead th { position: sticky; top: 0; background: var(--panel); }
+  tr.STALE td { background: rgba(245,166,35,0.07); }
+  tr.MISSING td { background: rgba(229,72,77,0.07); }
+  .empty { color: var(--muted); font-size: 13px; padding: 12px 0; }
+</style>
+</head>
+<body>
+  <a href="/">&larr; Back to dashboard</a>
+  <h1 id="pageTitle">Loading…</h1>
+  <div class="subtitle" id="pageSubtitle"></div>
+  <div id="srcLegend"></div>
+  <div id="dataHealth"></div>
+
+  <div style="margin-bottom:16px;">
+    <select id="rangeSelect">
+      <option value="1">Last 1 hour</option>
+      <option value="24" selected>Last 24 hours</option>
+      <option value="72">Last 3 days</option>
+      <option value="168">Last 7 days</option>
+      <option value="87600">All time</option>
+    </select>
+  </div>
+
+  <section id="verdictSection"><div id="seLag"></div><div id="verdictBanner"></div></section>
+
+  <div class="cards" id="analysisCards"></div>
+
+  <section>
+    <h2><span>Voltage / Current / Power over time<span data-acc="1"></span><span data-acc="2"></span> <span data-src="se"></span></span></h2>
+    <div class="muted" style="font-size:12px; margin-bottom:8px;">
+      Breaks in the lines are cycles where this optimizer reported nothing (MISSING).
+      Flat stretches are repeated stale readings.
+    </div>
+    <div class="chart-wrap"><canvas id="readingsChart"></canvas></div>
+  </section>
+
+  <section>
+    <h2><span>Output vs peers, by hour of day<span data-acc="4"></span><span data-acc="11"></span> <span data-src="calc" data-from="se"></span></span> <span class="muted" id="profileTz" style="font-weight:400;font-size:12px;"></span></h2>
+    <div class="muted" style="font-size:12px; margin-bottom:8px;">
+      100% means "producing like its neighbours" in that hour, each hour judged
+      against its own light level. <b>A dip at particular hours is shade</b> moving
+      across the panel as the sun swings — a tree, a chimney, an aerial.
+      <b>A flat line sitting low all day is the hardware.</b> This is the one
+      comparison a single hour can't make, however much data it has.
+    </div>
+    <div class="chart-wrap" style="height:260px"><canvas id="hourlyChart"></canvas></div>
+    <div id="profileVerdict" style="margin-top:10px"></div>
+  </section>
+
+  <section>
+    <h2><span>Detected communication gaps<span data-acc="10"></span> <span data-src="calc" data-from="se"></span></span></h2>
+    <div class="muted" style="font-size:12px; margin-bottom:8px;">
+      A gap means this optimizer's own reported timestamp jumped by more than
+      ~2.5 poll intervals — it stopped sending fresh telemetry for that long.
+      Cycles where our poller itself failed are excluded — but a gap can still be the
+      inverter's uploads to SolarEdge stalling, which hits every optimizer at once (*10).
+    </div>
+    <div id="gapsContainer"></div>
+  </section>
+
+  <section>
+    <h2><span>Full reading history <span data-src="se"></span></span> <span class="muted" id="rowCount" style="font-weight:400; font-size:12px;"></span></h2>
+    <div class="muted" style="font-size:12px; margin-bottom:8px;">
+      Most recent first. One row per poll cycle: FRESH = new measurement,
+      STALE = same timestamp returned again, MISSING = absent from the response.
+    </div>
+    <div class="scroll-table">
+      <table id="readingsTable">
+        <thead>
+          <tr>
+            <th class="from-calc" title="When our poller asked SolarEdge">Polled At</th>
+            <th class="from-calc" title="Our classification: FRESH / STALE / MISSING">Status</th>
+            <th class="from-se">Device Timestamp<span data-acc="2"></span></th>
+            <th class="num from-se">Voltage (V)</th>
+            <th class="num from-se">Opt. Voltage (V)</th>
+            <th class="num from-se">Current (A)</th>
+            <th class="num from-se">Power (W)<span data-acc="1"></span></th>
+            <th class="num from-se" title="SolarEdge's interval energy (~15 min trailing window) — relative only, not true Wh">Energy (interval)<span data-acc="5"></span></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <div id="accKeyHolder"></div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const serial = params.get("serial");
+let chart = null;
+const STATUS_CLASS = { FRESH: "ok", STALE: "warn", MISSING: "bad" };
+
+function fmt(n, digits = 2) {
+  return (n === null || n === undefined) ? "—" : Number(n).toFixed(digits);
+}
+
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+const VERDICT_CLASS = {
+  "GOOD": "ok", "LIKELY GOOD": "ok", "WATCH": "warn",
+  "SUSPECT": "bad", "BAD": "bad", "NO DATA": "bad",
+};
+
+let health = null;   // daylight-only electrical stats + verdict
+
+async function loadVerdict() {
+  const hours = document.getElementById("rangeSelect").value;
+  const el = document.getElementById("verdictBanner");
+  try {
+    const data = await getJSON(`/api/health?hours=${hours}`);
+    const h = data.optimizers.find(o => o.serial === serial);
+    health = h || null;
+    if (!h) { el.innerHTML = ""; return; }
+    const cls = VERDICT_CLASS[h.verdict] || "muted";
+    const weak = h.confidence === "INSUFFICIENT" || h.confidence === "LOW";
+    el.innerHTML = `
+      <div style="display:flex; align-items:center; gap:14px; flex-wrap:wrap">
+        <span class="badge ${cls}" style="font-size:15px; padding:5px 16px">${h.verdict}</span>${acc(4)} ${src("calc", "se")}
+        <span style="font-size:15px">score <b>${h.health_score}</b>/100</span>
+        <span class="muted">output vs peers: <b>${h.perf_ratio_pct ?? "—"}%</b></span>
+        <span class="muted">reporting: <b>${h.reliability_pct}%</b></span>
+        <span class="badge ${weak ? "warn" : "ok"}">${h.confidence} confidence
+          (${h.scored_samples} scored 15-min windows)</span>
+      </div>
+      ${weak ? `<div class="muted" style="font-size:12px; margin-top:8px">
+        Not enough daylight data yet for this verdict to mean much — it will
+        firm up as collection continues.</div>` : ""}`;
+  } catch (e) {
+    el.innerHTML = "";
+  }
+}
+
+async function loadAnalysis() {
+  const hours = document.getElementById("rangeSelect").value;
+  const a = await getJSON(`/api/optimizers/${encodeURIComponent(serial)}/analysis?hours=${hours}`);
+  const h = health || {};   // populated by loadVerdict, which runs first
+
+  document.getElementById("pageTitle").textContent = `${a.label} — ${a.serial}`;
+  document.getElementById("pageSubtitle").textContent =
+    `Observed in ${a.observed_cycles} of ${a.successful_cycles} successful poll cycles in this range`;
+
+  // Must be derived from the same (daylight-scoped) number that's displayed,
+  // or the badge colour contradicts its own value.
+  const rel = h.reliability_pct;
+  const freshCls = rel == null ? "muted" : (rel >= 90 ? "ok" : (rel >= 50 ? "warn" : "bad"));
+
+  let stuckValue;
+  if (a.latest_status === "FRESH") {
+    stuckValue = `<span class="badge ok">reporting</span>`;
+  } else if (a.stuck_minutes > 0) {
+    stuckValue = `<span class="badge bad">${Math.round(a.stuck_minutes)}m</span>`;
+  } else {
+    stuckValue = `<span class="badge bad">never</span>`;
+  }
+  const stuckCard = `<div class="card"><div class="label">Fresh Data${acc(10)} ${src("calc", "se")}</div>
+    <div class="value">${stuckValue}</div>
+    <div class="sub">last cycle: ${a.latest_status ?? "—"}</div></div>`;
+
+  document.getElementById("analysisCards").innerHTML = `
+    <div class="card"><div class="label">Freshness <span style="text-transform:none">(daylight)</span> ${src("calc", "se")}</div>
+      <div class="value"><span class="badge ${freshCls}">${h.reliability_pct ?? "—"}%</span></div>
+      <div class="sub">night excluded — going quiet after dark is normal</div></div>
+    <div class="card"><div class="label">Fresh ☀ ${src("calc", "se")}</div><div class="value" style="color:var(--ok)">${h.fresh_count ?? "—"}</div></div>
+    <div class="card"><div class="label">Stale ☀ ${src("calc", "se")}</div><div class="value" style="color:var(--warn)">${h.stale_count ?? "—"}</div></div>
+    <div class="card"><div class="label">Missing ☀ ${src("calc", "se")}</div><div class="value" style="color:var(--bad)">${h.missing_count ?? "—"}</div></div>
+    ${stuckCard}
+    <div class="card"><div class="label">Gaps Detected${acc(10)} ${src("calc", "se")}</div><div class="value">${a.gaps.length}</div></div>
+    <div class="card"><div class="label">Power <span style="text-transform:none">(daylight)</span>${acc(3)} ${src("calc", "se")}</div>
+      <div class="value">${fmt(h.avg_power, 1)} W</div>
+      <div class="sub">min ${fmt(h.min_power, 1)} · max ${fmt(h.max_power, 1)} W</div></div>
+    <div class="card"><div class="label">Voltage <span style="text-transform:none">(daylight)</span>${acc(3)} ${src("calc", "se")}</div>
+      <div class="value">${fmt(h.avg_voltage)} V</div>
+      <div class="sub">min ${fmt(h.min_voltage)} · max ${fmt(h.max_voltage)} V</div></div>
+    <div class="card"><div class="label">Current <span style="text-transform:none">(daylight)</span>${acc(3)} ${src("calc", "se")}</div>
+      <div class="value">${fmt(h.avg_current, 3)} A</div>
+      <div class="sub">min ${fmt(h.min_current, 3)} · max ${fmt(h.max_current, 3)} A</div></div>
+    <div class="card"><div class="label">Zero-Power${acc(1)} ${src("calc", "se")}</div><div class="value">${a.zero_power_count}</div><div class="sub">0 W snapshots, incl. night · daytime ones are usually telemetry glitches (energy unaffected)</div></div>
+  `;
+
+  const gapsEl = document.getElementById("gapsContainer");
+  if (!a.gaps.length) {
+    gapsEl.innerHTML = `<div class="empty">No gaps detected in this range.</div>`;
+  } else {
+    gapsEl.innerHTML = `<table><thead><tr><th>From</th><th>To</th><th class="num">Duration</th></tr></thead><tbody>${
+      a.gaps.map(g => `<tr><td>${g.from}</td><td>${g.to}</td><td class="num">${g.minutes} min</td></tr>`).join("")
+    }</tbody></table>`;
+  }
+}
+
+async function loadReadings() {
+  const hours = document.getElementById("rangeSelect").value;
+  const rows = await getJSON(`/api/optimizers/${encodeURIComponent(serial)}/readings?hours=${hours}`);
+  document.getElementById("rowCount").textContent = `(${rows.length} cycles)`;
+  renderChart(rows);
+
+  const tbody = document.querySelector("#readingsTable tbody");
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="8" class="empty">No readings in this range.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = [...rows].reverse().map(r => `
+    <tr class="${r.status}">
+      <td>${r.fetched_at}</td>
+      <td><span class="badge ${STATUS_CLASS[r.status] || "muted"}">${r.status}</span></td>
+      <td>${r.ts_utc ?? "—"}</td>
+      <td class="num">${fmt(r.voltage)}</td>
+      <td class="num">${fmt(r.optimizer_voltage)}</td>
+      <td class="num">${fmt(r.current, 3)}</td>
+      <td class="num">${fmt(r.power, 1)}</td>
+      <td class="num">${fmt(r.energy_wh, 1)}</td>
+    </tr>`).join("");
+}
+
+function renderChart(rows) {
+  const ctx = document.getElementById("readingsChart");
+  const data = {
+    labels: rows.map(r => r.fetched_at),
+    datasets: [
+      { label: "Power (W)", data: rows.map(r => r.power), borderColor: "#4f8cff", yAxisID: "y", tension: 0.15, pointRadius: 0, spanGaps: false },
+      { label: "Voltage (V)", data: rows.map(r => r.voltage), borderColor: "#2ecc71", yAxisID: "y1", tension: 0.15, pointRadius: 0, spanGaps: false },
+      { label: "Current (A)", data: rows.map(r => r.current), borderColor: "#f5a623", yAxisID: "y2", tension: 0.15, pointRadius: 0, spanGaps: false },
+    ],
+  };
+  if (chart) chart.destroy();
+  chart = new Chart(ctx, {
+    type: "line",
+    data,
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: "index", intersect: false },
+      scales: {
+        x: { ticks: { color: "#8b95ab", maxTicksLimit: 10 }, grid: { color: "#2a3450" } },
+        y: { position: "left", title: { display: true, text: "Power (W)", color: "#8b95ab" }, ticks: { color: "#8b95ab" }, grid: { color: "#2a3450" } },
+        y1: { position: "right", title: { display: true, text: "Voltage (V)", color: "#8b95ab" }, ticks: { color: "#8b95ab" }, grid: { drawOnChartArea: false } },
+        y2: { position: "right", title: { display: true, text: "Current (A)", color: "#8b95ab" }, ticks: { color: "#8b95ab" }, grid: { drawOnChartArea: false }, offset: true },
+      },
+      plugins: { legend: { labels: { color: "#e6ebf5" } } },
+    },
+  });
+}
+
+let hourlyChart = null;
+
+function hourLabel(h) {
+  const suffix = h < 12 ? "am" : "pm";
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${String(h).padStart(2,"0")}:00 (${h12}${suffix})`;
+}
+
+async function loadHourlyProfile() {
+  const hours = document.getElementById("rangeSelect").value;
+  const el = document.getElementById("profileVerdict");
+  let d;
+  try {
+    d = await getJSON(`/api/hourly?hours=${hours}`);
+  } catch (e) { return; }
+
+  document.getElementById("profileTz").textContent = `— times are ${d.timezone}`;
+  const me = d.optimizers.find(o => o.serial === serial);
+  const pts = me ? me.points : [];
+
+  if (hourlyChart) hourlyChart.destroy();
+  hourlyChart = new Chart(document.getElementById("hourlyChart"), {
+    type: "bar",
+    data: {
+      labels: pts.map(p => hourLabel(p.hour)),
+      datasets: [
+        { label: "% of peers", data: pts.map(p => p.ratio_pct),
+          backgroundColor: pts.map(p => p.ratio_pct >= 85 ? "#2ecc71"
+                                      : (p.ratio_pct >= 60 ? "#f5a623" : "#e5484d")) },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      scales: {
+        x: { ticks: { color: "#8b95ab" }, grid: { color: "#2a3450" } },
+        y: { title: { display: true, text: "% of peer median", color: "#8b95ab" },
+             ticks: { color: "#8b95ab" }, grid: { color: "#2a3450" },
+             suggestedMin: 0, suggestedMax: 120 },
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { afterLabel: (c) => `${pts[c.dataIndex].samples} samples` } },
+      },
+    },
+  });
+
+  if (!pts.length) {
+    el.innerHTML = `<span class="muted">Not enough good-light data yet to build a profile.</span>`;
+    return;
+  }
+  if (pts.length < 3) {
+    el.innerHTML = `<span class="badge warn">ONLY ${pts.length} HOUR(S) COVERED</span>
+      <span class="muted"> — shade and faults can't be told apart until the profile
+      spans more of the day.</span>`;
+    return;
+  }
+  // Shade moves, so it shows as a wide spread across hours; a failing panel
+  // is down by roughly the same proportion whenever the sun is up.
+  const shadeLike = me.spread_pct >= 35 && me.min_ratio_pct < 75;
+  const faultLike = me.spread_pct < 25 && me.min_ratio_pct < 75;
+  el.innerHTML = shadeLike
+    ? `<span class="badge warn">PATTERN: SHADE-LIKE</span>
+       <span class="muted"> — drops to ${me.min_ratio_pct}% in some hours but recovers
+       in others (spread ${me.spread_pct} points). That's consistent with something
+       shading it part of the day rather than a failing panel.</span>`
+    : faultLike
+      ? `<span class="badge bad">PATTERN: FAULT-LIKE</span>
+         <span class="muted"> — down to around ${me.min_ratio_pct}% of its peers at
+         every hour (spread only ${me.spread_pct} points). A consistent shortfall
+         regardless of sun position points at the panel or optimizer itself.</span>`
+      : `<span class="badge ok">PATTERN: NORMAL</span>
+         <span class="muted"> — tracks its peers across the day
+         (low ${me.min_ratio_pct}%, spread ${me.spread_pct} points).</span>`;
+}
+
+async function loadDataHealth() {
+  try {
+    const d = await getJSON("/api/inverter");
+    document.getElementById("dataHealth").innerHTML = healthStrip(d, "/#dataSources");
+    document.getElementById("seLag").innerHTML = seLagBanner(d);
+  } catch (e) {}
+}
+
+async function refreshAll() {
+  loadDataHealth();
+  await loadVerdict();          // must land first: loadAnalysis reads its stats
+  await Promise.all([loadAnalysis(), loadReadings(), loadHourlyProfile()]);
+}
+
+document.getElementById("rangeSelect").addEventListener("change", refreshAll);
+
+if (!serial) {
+  document.body.innerHTML = `<p>No optimizer serial given. <a href="/">Back to dashboard</a></p>`;
+} else {
+  document.getElementById("srcLegend").innerHTML = srcLegend();
+  document.getElementById("accKeyHolder").innerHTML = accKey([1, 2, 3, 4, 5, 10, 11]);
+  fillMarkers();
+  refreshAll();
+}
+</script>
+</body>
+</html>

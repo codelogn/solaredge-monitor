@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SolarMonitor</title>
+<script src="chart.umd.min.js"></script>
+<link rel="stylesheet" href="sources.css">
+<script src="sources.js"></script>
+<style>
+  :root {
+    --bg: #0f1420; --panel: #161d2e; --panel-2: #1c2438; --border: #2a3450;
+    --text: #e6ebf5; --muted: #8b95ab; --accent: #4f8cff;
+    --ok: #2ecc71; --warn: #f5a623; --bad: #e5484d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    background: var(--bg); color: var(--text); padding: 24px; max-width: 1400px; margin: 0 auto;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .card .value { font-size: 22px; font-weight: 600; margin-top: 4px; }
+  .card .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .badge.ok { background: rgba(46,204,113,0.15); color: var(--ok); }
+  .badge.warn { background: rgba(245,166,35,0.15); color: var(--warn); }
+  .badge.bad { background: rgba(229,72,77,0.15); color: var(--bad); }
+  .badge.muted { background: rgba(139,149,171,0.15); color: var(--muted); }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; margin-bottom: 20px; }
+  section h2 { font-size: 15px; margin: 0 0 12px; display: flex; align-items: center; justify-content: space-between; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; cursor: pointer; user-select: none; white-space: nowrap; }
+  th[data-key]:hover { color: var(--text); }
+  th.grouphead {
+    cursor: default; text-align: center; color: var(--text); font-size: 12px;
+    border-bottom: 1px solid var(--border); padding-bottom: 3px;
+  }
+  th.sub { font-size: 11px; font-weight: 400; padding-top: 2px; }
+  .scroll-x { overflow-x: auto; }
+  #summaryTable td, #summaryTable th { padding: 6px 8px; }
+  tr:hover td { background: var(--panel-2); }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  select { background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 5px 10px; font-size: 13px; cursor: pointer; }
+  .muted { color: var(--muted); }
+  .errors-list { max-height: 240px; overflow-y: auto; font-size: 12px; }
+  .errors-list div.row { padding: 6px 0; border-bottom: 1px solid var(--border); }
+  .errors-list .ts { color: var(--muted); margin-right: 8px; }
+  .empty { color: var(--muted); font-size: 13px; padding: 12px 0; }
+</style>
+</head>
+<body>
+  <h1>SolarMonitor</h1>
+  <div class="subtitle">Site optimizer voltage/current dashboard — auto-refreshes every 30s</div>
+  <div id="srcLegend"></div>
+  <div id="dataHealth"></div>
+
+  <div class="cards" id="statusCards"></div>
+
+  <section>
+    <h2>
+      <span>Inverter today — real time over your LAN &amp; cloud upload delay<span data-acc="9"></span></span>
+      <span class="muted" style="font-weight:400; font-size:12px;" id="invSampling"></span>
+    </h2>
+    <div class="cards" id="inverterCards" style="margin-bottom:12px;"></div>
+    <div class="muted" style="font-size:12px; margin-bottom:10px; line-height:1.5;">
+      <b>DC power</b> is read straight from the inverter on the LAN — real time, and the
+      authoritative total. <b>Cloud delay</b> is how old the newest optimizer measurement was
+      when we polled SolarEdge; normally ~2 min. When it climbs while the inverter is producing,
+      the inverter's internet uploads are falling behind and per-panel data for that period is
+      late or lost — usually a weak network link at the inverter. Delay is blank when the inverter isn't producing, since optimizers
+      legitimately stop reporting after dark.
+    </div>
+    <div style="height:260px;"><canvas id="inverterChart"></canvas></div>
+  </section>
+
+  <section>
+    <h2>
+      <span>Optimizers — latest reading via the internet (can lag)<span data-acc="1"></span><span data-acc="2"></span> <span data-src="se"></span></span>
+      <span class="muted" style="font-weight:400; font-size:12px;">click a row for full history →</span>
+    </h2>
+    <div id="seLagOptimizers"></div>
+    <div class="muted" style="font-size:12px; margin-bottom:10px;">
+      <span id="siteState"></span>
+      <b>Last Measurement</b> is SolarEdge's own timestamp for the reading — when the
+      optimizer took it, not when we stored it. A brand-new database will still show old
+      timestamps here if the hardware hasn't produced anything since.
+    </div>
+    <table id="optimizersTable">
+      <thead>
+        <tr>
+          <th data-key="serial" class="from-se">Serial</th>
+          <th data-key="label" class="from-se">Label</th>
+          <th data-key="last_seen_ago" class="num from-se">Last Measurement<span data-acc="2"></span></th>
+          <th data-key="voltage" class="num from-se">Voltage (V)</th>
+          <th data-key="optimizer_voltage" class="num from-se">Opt. Voltage (V)</th>
+          <th data-key="current" class="num from-se">Current (A)</th>
+          <th data-key="power" class="num from-se">Power (W)<span data-acc="1"></span></th>
+          <th data-key="latest_status" class="from-calc">Last Cycle</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>
+      <span>Health verdict <span data-src="calc" data-from="se"></span></span>
+      <span>
+        <select id="hourSelect" title="Restrict scoring to one hour of the day">
+          <option value="">All daylight hours</option>
+        </select>
+        <select id="rangeSelect">
+          <option value="24">Last 24 hours</option>
+          <option value="72" selected>Last 3 days</option>
+          <option value="168">Last 7 days</option>
+          <option value="720">Last 30 days</option>
+          <option value="87600">All time</option>
+        </select>
+      </span>
+    </h2>
+    <div id="seLagHealth"></div>
+    <div class="muted" style="font-size:12px; margin-bottom:10px; line-height:1.5;">
+      <b>vs Peers</b> is this optimizer's reported <i>interval energy</i> as a % of the median of
+      its own <b>panel-model group</b> <i>in the same 15-minute window</i> — so sun angle and cloud
+      cancel out, and 100% means "producing like its neighbours". Energy rather than the instant
+      power snapshot, because snapshots taken a minute apart under moving cloud see different
+      skies, and occasional 0 W snapshots are telemetry glitches.
+      <b>Score</b> multiplies output-vs-peers by reporting reliability, so neither problem can
+      mask the other. Worst first.
+      <br>
+      <span id="cycleFilterNote">—</span>
+      <br>
+      <b>☀ columns are daylight-only</b> — including night would pin every optimizer's
+      minimum at ~0 W and drag the averages toward zero, making them useless for comparison.
+      A 0 W minimum is <i>not</i> by itself a fault: optimizers commonly
+      reports 0 A at open-circuit voltage for one snapshot, yet its energy counter for that
+      interval is normal — a telemetry glitch, not lost production.
+      <br>
+      <b style="color:var(--warn)">Always check Confidence before acting</b> — a verdict from
+      a handful of samples is noise. Low output can also mean shade from a tree or chimney
+      rather than a fault, so treat this as a shortlist to investigate, not a diagnosis.
+    </div>
+    <div class="scroll-x">
+    <table id="summaryTable">
+      <thead>
+        <tr>
+          <th rowspan="2" data-key="serial" class="from-se">Serial</th>
+          <th rowspan="2" data-key="label" class="from-se">Pos</th>
+          <th rowspan="2" data-key="panel_model" class="from-se">Group</th>
+          <th rowspan="2" data-key="health_score" class="from-calc">Verdict<span data-acc="4"></span></th>
+          <th rowspan="2" data-key="health_score" class="num from-calc">Score</th>
+          <th rowspan="2" data-key="perf_ratio_pct" class="num from-calc">vs Peers<span data-acc="4"></span></th>
+          <th rowspan="2" data-key="reliability_pct" class="num from-calc">F / S / M</th>
+          <th rowspan="2" data-key="reliability_pct" class="num from-calc">Fresh %</th>
+          <th colspan="3" class="grouphead from-calc">Power (W) ☀<span data-acc="3"></span></th>
+          <th colspan="3" class="grouphead from-calc">Voltage (V) ☀<span data-acc="3"></span></th>
+          <th colspan="3" class="grouphead from-calc">Current (A) ☀<span data-acc="3"></span></th>
+          <th rowspan="2" data-key="scored_samples" class="from-calc">Confidence</th>
+        </tr>
+        <tr>
+          <th data-key="avg_power" class="num sub from-calc">avg</th>
+          <th data-key="min_power" class="num sub from-calc">min</th>
+          <th data-key="max_power" class="num sub from-calc">max</th>
+          <th data-key="avg_voltage" class="num sub from-calc">avg</th>
+          <th data-key="min_voltage" class="num sub from-calc">min</th>
+          <th data-key="max_voltage" class="num sub from-calc">max</th>
+          <th data-key="avg_current" class="num sub from-calc">avg</th>
+          <th data-key="min_current" class="num sub from-calc">min</th>
+          <th data-key="max_current" class="num sub from-calc">max</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    </div>
+  </section>
+
+  <section>
+    <h2><span>Poller failures <span data-src="calc"></span></span> <span class="muted" style="font-weight:400;font-size:12px;">our own network/auth problems — never counted against an optimizer</span></h2>
+    <div class="errors-list" id="errorsList"></div>
+  </section>
+
+  <section id="dataSources">
+    <h2><span>Data sources &amp; reliability — which to trust, and when</span></h2>
+    <div class="scroll-x">
+    <table class="ds-table">
+      <thead><tr>
+        <th></th>
+        <th>Inverter <span data-src="inv"></span><br><span class="muted" style="font-weight:400">over your LAN (Modbus TCP)</span></th>
+        <th>SolarEdge server <span data-src="se"></span><br><span class="muted" style="font-weight:400">over the internet</span></th>
+      </tr></thead>
+      <tbody>
+        <tr><td><b>What it gives</b></td>
+          <td>The whole inverter: DC and AC power, voltage, current, frequency, status, heatsink
+            temperature, lifetime energy counter.</td>
+          <td>Each optimizer: panel voltage, optimizer output voltage, current, power, interval
+            energy — plus the site layout (serials, positions, panel models).</td></tr>
+        <tr><td><b>How it gets here</b></td>
+          <td>This server asks the inverter directly, every 30 seconds. No internet involved.</td>
+          <td>Optimizers → inverter (over the DC power lines) → the inverter's internet connection
+            → SolarEdge's servers → this server, polled every 2 minutes. The SolarEdge app shows
+            this same data.</td></tr>
+        <tr><td><b>How current</b></td>
+          <td>Real time.</td>
+          <td>Normally ~2 minutes old. Hours old when the inverter's uploads fall behind.</td></tr>
+        <tr><td><b>How it fails</b></td>
+          <td>A read fails outright (counted in <i>Modbus Reads</i>), or the inverter answers with
+            an old snapshot, which is detected and discarded. Energy totals stay correct across
+            gaps, because the inverter's own counter keeps counting.</td>
+          <td>Data arrives late, or a stretch never arrives. Nothing that arrives is wrong —
+            each reading carries the time it was measured — but late or missing stretches leave
+            holes in the per-panel history.</td></tr>
+        <tr><td><b>Per-panel detail</b></td>
+          <td>None — the inverter only reports its totals.</td>
+          <td>The <b>only</b> source for individual panels and optimizers.</td></tr>
+        <tr><td><b>Trust it for</b></td>
+          <td>Is it producing right now, today's energy and peak, inverter status and faults,
+            and anything that should match your utility bill.</td>
+          <td>Which panel or optimizer is weak, shade patterns by hour, reporting problems of a
+            single optimizer.</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <div class="ds-faq">
+      <p><b>Should I worry about SolarEdge data when the upload is behind?</b> Not about its
+        accuracy — about its completeness and freshness. Late readings are still correct and are
+        analysed at the time they were measured, so verdicts stay valid. But while it's behind,
+        the Optimizers table shows the panels as they were hours ago, and stretches that never
+        arrive can't be scored — typically afternoons, if the link degrades as the day goes on.
+        The <i>Per-panel data</i> flag at the top of the page and the <i>Cloud Delay</i> card
+        say when this is happening.</p>
+      <p><b>Is Modbus data more reliable?</b> For whole-system figures, yes: it comes straight
+        from the inverter, in real time, with no cloud in between, and its energy counter is the
+        same one SolarEdge eventually reports. When the two disagree, believe the inverter. But
+        it can't tell you anything about individual panels, and if reads are failing, the
+        "now" figures can be minutes old — see the <i>Inverter data</i> flag.</p>
+      <p><b>Why doesn't the dashboard match the SolarEdge app?</b> The app shows SolarEdge server
+        data, so it carries the same upload delay. Inverter-tagged figures here are live; the app
+        catches up once the inverter's backlog uploads.</p>
+      <p><b>Both flags red at once?</b> Modbus and the cloud upload usually share the inverter's
+        network connection. Failing Modbus reads together with a growing cloud delay point at
+        that connection — a weak Wi-Fi link is the usual cause, and a wired Ethernet connection
+        to the inverter is the usual fix. Neither affects how much the panels produce.</p>
+    </div>
+  </section>
+
+  <div id="accKeyHolder"></div>
+
+<script>
+let sortState = {};
+let pollInterval = 300;
+let lastOptimizers = [];
+let lastSummary = [];
+
+function timeAgo(iso) {
+  if (!iso) return null;
+  const d = new Date(iso.endsWith("Z") ? iso : iso + "Z");
+  const secs = Math.floor((Date.now() - d.getTime()) / 1000);
+  if (secs < 60) return secs + "s ago";
+  if (secs < 3600) return Math.floor(secs / 60) + "m ago";
+  if (secs < 86400) return Math.floor(secs / 3600) + "h ago";
+  return Math.floor(secs / 86400) + "d ago";
+}
+
+function secsAgo(iso) {
+  if (!iso) return Infinity;
+  const d = new Date(iso.endsWith("Z") ? iso : iso + "Z");
+  return (Date.now() - d.getTime()) / 1000;
+}
+
+function fmt(n, digits = 2) {
+  return (n === null || n === undefined) ? "—" : Number(n).toFixed(digits);
+}
+
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+const STATUS_CLASS = { FRESH: "ok", STALE: "warn", MISSING: "bad" };
+
+async function loadStatus() {
+  const cardsEl = document.getElementById("statusCards");
+  try {
+    const s = await getJSON("/api/status");
+    pollInterval = s.poll_interval_seconds || 300;
+    const lastAgo = secsAgo(s.last_successful_cycle_at);
+    let pollerBadge;
+    if (!s.last_successful_cycle_at) pollerBadge = `<span class="badge bad">NO DATA YET</span>`;
+    else if (lastAgo < pollInterval * 3) pollerBadge = `<span class="badge ok">ACTIVE</span>`;
+    else pollerBadge = `<span class="badge bad">STALE</span>`;
+
+    const siteEl = document.getElementById("siteState");
+    if (siteEl) {
+      siteEl.innerHTML = s.last_cycle_fresh === 0
+        ? `<span class="badge muted">SITE IDLE</span> No optimizer reported a new measurement
+           last cycle — after dark that's expected, and the STALE badges below just mean
+           "nothing new since our previous poll". `
+        : `<span class="badge ok">SITE GENERATING</span> ${s.last_cycle_fresh} optimizer(s)
+           reported new measurements last cycle. `;
+    }
+
+    let cyclesCard = `<div class="card"><div class="label">Poll Cycles (24h) ${src("calc")}</div><div class="value muted">n/a</div></div>`;
+    let requestsCard = "";
+    try {
+      const c = await getJSON("/api/cycles?hours=24");
+      const cls = c.completeness_pct >= 95 ? "ok" : (c.completeness_pct >= 70 ? "warn" : "bad");
+      cyclesCard = `<div class="card">
+        <div class="label">Poll Cycles (24h) ${src("calc")}</div>
+        <div class="value"><span class="badge ${cls}">${c.ok_cycles}/${c.expected_cycles}</span></div>
+        <div class="sub">${c.failed_cycles} failed on our side</div>
+      </div>`;
+
+      const rl = c.rate_limited_cycles;
+      requestsCard = `<div class="card">
+        <div class="label">SolarEdge Requests (24h) ${src("calc")}</div>
+        <div class="value">${c.requests_made.toLocaleString()}</div>
+        <div class="sub">1 per cycle · ~${c.requests_per_day_projected.toLocaleString()}/day
+          at ${Math.round(c.poll_interval_seconds / 60)} min</div>
+      </div>
+      <div class="card">
+        <div class="label">Rate Limited ${src("calc")}</div>
+        <div class="value">${rl > 0
+          ? `<span class="badge bad">${rl}</span>`
+          : `<span class="badge ok">none</span>`}</div>
+        <div class="sub">${rl > 0
+          ? "SolarEdge is throttling — consider a longer interval"
+          : "no throttling seen"}</div>
+      </div>`;
+    } catch (e) {}
+
+    cardsEl.innerHTML = `
+      <div class="card"><div class="label">Poller ${src("calc")}</div><div class="value">${pollerBadge}</div>
+        <div class="sub">last OK ${timeAgo(s.last_successful_cycle_at) ?? "—"}</div></div>
+      ${cyclesCard}
+      ${requestsCard}
+      <div class="card"><div class="label">Optimizers${acc(8)} ${src("se")}</div><div class="value">${s.total_optimizers}</div></div>
+      <div class="card"><div class="label">Reading Records ${src("calc")}</div><div class="value">${s.total_readings.toLocaleString()}</div></div>
+      <div class="card"><div class="label">Failures (1h) ${src("calc")}</div><div class="value">${s.failures_last_hour}</div></div>
+      <div class="card"><div class="label">DB Size ${src("calc")}</div><div class="value">${(s.db_size_bytes/1024/1024).toFixed(1)} MB</div></div>
+    `;
+  } catch (e) {
+    cardsEl.innerHTML = `<div class="card"><div class="label">Status</div><div class="value"><span class="badge bad">UNREACHABLE</span></div></div>`;
+  }
+}
+
+function sortRows(rows, key, dir) {
+  return [...rows].sort((a, b) => {
+    let av = a[key], bv = b[key];
+    if (av === null || av === undefined) av = -Infinity;
+    if (bv === null || bv === undefined) bv = -Infinity;
+    if (typeof av === "string" && typeof bv === "string") return dir * av.localeCompare(bv);
+    return dir * (av - bv);
+  });
+}
+
+function attachSort(tableId, getRows, render) {
+  document.querySelectorAll(`#${tableId} th[data-key]`).forEach(th => {
+    th.addEventListener("click", () => {
+      const key = th.dataset.key;
+      const cur = sortState[tableId];
+      const dir = (cur && cur.key === key) ? -cur.dir : 1;
+      sortState[tableId] = { key, dir };
+      render(sortRows(getRows(), key, dir));
+    });
+  });
+}
+
+function openOptimizer(serial) {
+  window.open(`optimizer.html?serial=${encodeURIComponent(serial)}`, "_blank");
+}
+
+async function loadOptimizers() {
+  const rows = await getJSON("/api/optimizers");
+  rows.forEach(r => { r.last_seen_ago = r.ts_utc ? -secsAgo(r.ts_utc) : -Infinity; });
+  lastOptimizers = rows;
+  renderOptimizers(rows);
+}
+
+function renderOptimizers(rows) {
+  const tbody = document.querySelector("#optimizersTable tbody");
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="8" class="empty">No optimizers discovered yet.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = rows.map(r => {
+    const st = r.latest_status || "—";
+    const cls = STATUS_CLASS[st] || "muted";
+    return `<tr data-serial="${r.serial}" style="cursor:pointer">
+      <td>${r.serial}</td>
+      <td>${r.label ?? ""}</td>
+      <td class="num">${timeAgo(r.ts_utc) ?? "never"}</td>
+      <td class="num">${fmt(r.voltage)}</td>
+      <td class="num">${fmt(r.optimizer_voltage)}</td>
+      <td class="num">${fmt(r.current, 3)}</td>
+      <td class="num">${fmt(r.power, 1)}</td>
+      <td><span class="badge ${cls}">${st}</span></td>
+    </tr>`;
+  }).join("");
+  tbody.querySelectorAll("tr[data-serial]").forEach(tr => {
+    tr.addEventListener("click", () => openOptimizer(tr.dataset.serial));
+  });
+}
+
+const VERDICT_CLASS = {
+  "GOOD": "ok", "LIKELY GOOD": "ok", "WATCH": "warn",
+  "SUSPECT": "bad", "BAD": "bad", "NO DATA": "bad",
+};
+const CONFIDENCE_CLASS = {
+  "HIGH": "ok", "MEDIUM": "warn", "LOW": "muted", "INSUFFICIENT": "muted",
+};
+
+function hourLabel(h) {
+  const suffix = h < 12 ? "am" : "pm";
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${String(h).padStart(2, "0")}:00 (${h12}${suffix})`;
+}
+
+// Offer only hours the site actually has usable data in, so the dropdown
+// can't invite an analysis of the middle of the night.
+async function populateHours() {
+  const sel = document.getElementById("hourSelect");
+  try {
+    const d = await getJSON("/api/hourly?hours=87600");
+    const current = sel.value;
+    sel.innerHTML = `<option value="">All daylight hours</option>` +
+      d.hours_covered.map(h => `<option value="${h}">${hourLabel(h)}</option>`).join("");
+    sel.value = current;
+    sel.title = `Hours are ${d.timezone} (site local time)`;
+  } catch (e) {}
+}
+
+async function loadSummary() {
+  const hours = document.getElementById("rangeSelect").value;
+  const hod = document.getElementById("hourSelect").value;
+  const data = await getJSON(
+    `/api/health?hours=${hours}` + (hod !== "" ? `&hour_of_day=${hod}` : ""));
+  document.getElementById("cycleFilterNote").innerHTML =
+    `Scored on <b>${data.scored_windows}</b> ${data.window_minutes}-minute window${data.scored_windows === 1 ? "" : "s"} of
+     usable light. Skipped <b>${data.excluded_weak_light}</b> too dark or dim
+     (below ${data.strong_light_fraction_pct}% of this range's bright level)` +
+    (data.excluded_sparse
+      ? ` and <b>${data.excluded_sparse}</b> where too few optimizers had reported to compare
+          them fairly (usually a gap in SolarEdge's delivery).`
+      : ".") +
+    ` Hours and ordering use SolarEdge's measurement time, not our poll time —
+      it backfills readings well after they were taken.` +
+    (data.hour_of_day !== null && data.hour_of_day !== undefined
+      ? ` <b style="color:var(--accent)">Showing ${hourLabel(data.hour_of_day)} ${data.timezone}
+          only.</b> A single hour cannot tell shade from a fault — open an optimizer to see
+          its by-hour profile.`
+      : "");
+  lastSummary = data.optimizers;
+  renderSummary(data.optimizers);
+}
+
+function posOf(label) {
+  // "Optimizer 1.0.13 (REC 365)" -> "1.0.13"; the panel model is on the
+  // detail page, and the full label costs too much width here.
+  const m = (label || "").match(/([\d]+(?:\.[\d]+)+)/);
+  return m ? m[1] : (label ?? "");
+}
+
+function pctBadge(pct, goodAt, warnAt) {
+  if (pct === null || pct === undefined) return `<span class="badge muted">—</span>`;
+  const cls = pct >= goodAt ? "ok" : (pct >= warnAt ? "warn" : "bad");
+  return `<span class="badge ${cls}">${pct}%</span>`;
+}
+
+function renderSummary(rows) {
+  const tbody = document.querySelector("#summaryTable tbody");
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="18" class="empty">No data in this range yet.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = rows.map(r => {
+    const vCls = VERDICT_CLASS[r.verdict] || "muted";
+    const cCls = CONFIDENCE_CLASS[r.confidence] || "muted";
+    return `<tr data-serial="${r.serial}" style="cursor:pointer">
+      <td>${r.serial}</td>
+      <td>${posOf(r.label)}</td>
+      <td class="muted">${r.panel_model ?? "—"}</td>
+      <td><span class="badge ${vCls}">${r.verdict}</span></td>
+      <td class="num">${r.health_score}</td>
+      <td class="num">${pctBadge(r.perf_ratio_pct, 85, 60)}</td>
+      <td class="num muted">${r.fresh_count} / ${r.stale_count} / ${r.missing_count}</td>
+      <td class="num">${pctBadge(r.reliability_pct, 90, 50)}</td>
+      <td class="num">${fmt(r.avg_power, 1)}</td>
+      <td class="num">${fmt(r.min_power, 1)}</td>
+      <td class="num">${fmt(r.max_power, 1)}</td>
+      <td class="num">${fmt(r.avg_voltage, 2)}</td>
+      <td class="num">${fmt(r.min_voltage, 2)}</td>
+      <td class="num">${fmt(r.max_voltage, 2)}</td>
+      <td class="num">${fmt(r.avg_current, 3)}</td>
+      <td class="num">${fmt(r.min_current, 3)}</td>
+      <td class="num">${fmt(r.max_current, 3)}</td>
+      <td><span class="badge ${cCls}">${r.confidence}</span>
+          <span class="muted" style="font-size:11px">${r.scored_samples}</span></td>
+    </tr>`;
+  }).join("");
+  tbody.querySelectorAll("tr[data-serial]").forEach(tr => {
+    tr.addEventListener("click", () => openOptimizer(tr.dataset.serial));
+  });
+}
+
+async function loadErrors() {
+  const rows = await getJSON("/api/errors?limit=30");
+  const el = document.getElementById("errorsList");
+  if (!rows.length) {
+    el.innerHTML = `<div class="empty">No poller failures recorded.</div>`;
+    return;
+  }
+  el.innerHTML = rows.map(r => `<div class="row">
+    <span class="ts">${r.started_at}</span>
+    <span class="badge bad">${r.status}</span>
+    <span style="margin-left:8px">${r.error_message ?? ""}</span>
+  </div>`).join("");
+}
+
+let inverterChart = null;
+
+async function loadInverter() {
+  const cardsEl = document.getElementById("inverterCards");
+  let d;
+  try {
+    d = await getJSON("/api/inverter");
+  } catch (e) {
+    cardsEl.innerHTML = `<div class="card"><div class="label">Inverter ${src("inv")}</div><div class="value"><span class="badge muted">n/a</span></div></div>`;
+    return;
+  }
+  document.getElementById("dataHealth").innerHTML = healthStrip(d);
+  const lag = seLagBanner(d);
+  document.getElementById("seLagOptimizers").innerHTML = lag;
+  document.getElementById("seLagHealth").innerHTML = lag;
+
+  const tz = d.timezone;
+  const clock = iso => new Date(iso).toLocaleTimeString([], { timeZone: tz, hour: "2-digit", minute: "2-digit" });
+  const L = d.latest;
+  document.getElementById("invSampling").textContent =
+    `sampled every ${d.modbus_interval_seconds}s`;
+
+  const statusCls = !L ? "muted" : (L.status === 4 ? "ok" : ([5, 7].includes(L.status) ? "bad" : "muted"));
+  const reads = d.reads_last_hour, fails = d.failures_last_hour;
+  const total = reads + fails;
+  const okPct = total ? Math.round(100 * reads / total) : null;
+  const okCls = okPct === null ? "muted" : (okPct >= 95 ? "ok" : (okPct >= 70 ? "warn" : "bad"));
+  const delay = d.cloud_delay_minutes;
+  const delayBadge = delay === null
+    ? `<span class="badge muted">n/a</span>`
+    : `<span class="badge ${d.cloud_backlogged ? "bad" : "ok"}">${delay < 60 ? Math.round(delay) + " min" : (delay / 60).toFixed(1) + " h"}</span>`;
+
+  cardsEl.innerHTML = `
+    <div class="card"><div class="label">DC Power now${acc(7)} ${src("inv")}</div>
+      <div class="value">${L ? Math.round(L.dc_power).toLocaleString() + " W" : "—"}</div>
+      <div class="sub">${L ? `AC ${Math.round(L.ac_power)} W · ${fmt(L.ac_voltage, 1)} V · ${timeAgo(L.fetched_at)}` : ""}</div></div>
+    <div class="card"><div class="label">Inverter Status ${src("inv")}</div>
+      <div class="value"><span class="badge ${statusCls}">${d.latest_status_name ?? "—"}</span></div>
+      <div class="sub">${L ? `heatsink ${fmt(L.temperature, 1)} °C` : ""}</div></div>
+    <div class="card"><div class="label">Today's Peak${acc(6)} ${src("calc", "inv")}</div>
+      <div class="value">${d.today_peak_dc_w ? Math.round(d.today_peak_dc_w).toLocaleString() + " W" : "—"}</div>
+      <div class="sub">${d.today_peak_at ? "at " + clock(d.today_peak_at) : ""}${d.array_nameplate_w ? ` · ${d.array_nameplate_w.toLocaleString()} W nameplate` : ""}</div></div>
+    <div class="card"><div class="label">Energy Today${acc(7)} ${src("calc", "inv")}</div>
+      <div class="value">${d.today_energy_wh !== null ? (d.today_energy_wh / 1000).toFixed(2) + " kWh" : "—"}</div>
+      <div class="sub">today's rise in the inverter's lifetime counter (AC)</div></div>
+    <div class="card"><div class="label">Modbus Reads (1h) ${src("calc")}</div>
+      <div class="value"><span class="badge ${okCls}">${okPct === null ? "none" : okPct + "%"}</span></div>
+      <div class="sub">${reads} ok · ${fails} failed after retry</div></div>
+    <div class="card"><div class="label">Cloud Delay ${src("calc", "se")}</div>
+      <div class="value">${delayBadge}</div>
+      <div class="sub">${d.cloud_backlogged
+        ? "SolarEdge is receiving uploads late — per-panel data is lagging"
+        : (delay === null ? "inverter not producing, or no recent inverter read to confirm it" : "normal is ~2 min")}</div></div>
+  `;
+
+  const pts = (rows, key) => rows.map(r => ({ x: new Date(r.at).getTime(), y: r[key] }));
+  // Start an hour before production so the night doesn't take half the width.
+  const firstLight = d.series.find(r => (r.dc || 0) > 0);
+  const xMin = firstLight ? new Date(firstLight.at).getTime() - 3600e3 : undefined;
+  const data = {
+    datasets: [
+      { label: "DC power (W) — Inverter", data: pts(d.series, "dc"), borderColor: "#4f8cff", yAxisID: "y", pointRadius: 0, borderWidth: 1.5, spanGaps: 5 * 60 * 1000 },
+      { label: "Cloud delay (min) — Computed from SolarEdge timestamps", data: pts(d.delay_series, "minutes"), borderColor: "#f5a623", yAxisID: "y1", pointRadius: 0, borderWidth: 1.5, spanGaps: false },
+    ],
+  };
+  const options = {
+    responsive: true, maintainAspectRatio: false, animation: false, parsing: false,
+    interaction: { mode: "nearest", axis: "x", intersect: false },
+    scales: {
+      x: { type: "linear", min: xMin, max: Date.now(), ticks: { color: "#8b95ab", maxTicksLimit: 12, callback: v => clock(v) }, grid: { color: "#2a3450" } },
+      y: { position: "left", beginAtZero: true, title: { display: true, text: "DC power (W)", color: "#8b95ab" }, ticks: { color: "#8b95ab" }, grid: { color: "#2a3450" } },
+      y1: { position: "right", beginAtZero: true, title: { display: true, text: "Cloud delay (min)", color: "#8b95ab" }, ticks: { color: "#8b95ab" }, grid: { drawOnChartArea: false } },
+    },
+    plugins: {
+      legend: { labels: { color: "#e6ebf5" } },
+      tooltip: { callbacks: { title: items => items.length ? clock(items[0].parsed.x) : "" } },
+    },
+  };
+  if (inverterChart) {
+    inverterChart.data = data;
+    inverterChart.options.scales.x.min = xMin;
+    inverterChart.options.scales.x.max = Date.now();
+    inverterChart.update("none");
+  } else {
+    inverterChart = new Chart(document.getElementById("inverterChart"), { type: "line", data, options });
+  }
+}
+
+async function refreshAll() {
+  await Promise.allSettled([loadStatus(), loadInverter(), loadOptimizers(), loadSummary(), loadErrors()]);
+}
+
+document.getElementById("rangeSelect").addEventListener("change", loadSummary);
+document.getElementById("hourSelect").addEventListener("change", loadSummary);
+populateHours();
+attachSort("optimizersTable", () => lastOptimizers, renderOptimizers);
+attachSort("summaryTable", () => lastSummary, renderSummary);
+
+document.getElementById("srcLegend").innerHTML = srcLegend();
+document.getElementById("accKeyHolder").innerHTML = accKey([1, 2, 3, 4, 6, 7, 8, 9]);
+fillMarkers();
+
+refreshAll();
+setInterval(refreshAll, 30000);
+</script>
+</body>
+</html>
