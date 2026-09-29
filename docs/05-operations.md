@@ -32,25 +32,41 @@ Never commit `.env`, `session/cookies.json` or `data/` — all gitignored.
 
 ## Running
 
-The two processes are controlled independently, which is the point:
+For unattended running, install both processes as systemd services — they
+then **start at boot and restart within seconds if they crash**:
+
+```bash
+./scripts/install_systemd.sh               # needs sudo; safe to re-run
+./scripts/install_systemd.sh --uninstall   # remove both services
+```
+
+This creates `solarmonitor.service` (collector) and
+`solarmonitor-web.service` (dashboard on port 8090, or
+`SOLARMONITOR_WEBAPP_PORT`). They stay separate on purpose: restarting the
+dashboard never interrupts collection. `.env` is read by the app itself,
+not passed to systemd, which parses such files differently (e.g. `$`).
+
+The two processes are controlled independently, with or without systemd:
 
 ```bash
 ./scripts/poller_ctl.sh  {start|stop|restart|status}    # data collection
 ./scripts/webapp_ctl.sh  {start|stop|restart|status}    # dashboard
 ```
 
-Logs: `data/poller.log`, `data/webapp.log`. PIDs: `data/*.pid`.
+Once the services are installed these scripts drive `systemctl`, so a
+second, unmanaged collector can never be started alongside the service —
+two collectors would fight over the inverter's single Modbus connection.
+Without systemd they fall back to `nohup` background processes (PIDs in
+`data/*.pid`), which survive a closed terminal but **not a reboot**.
 
-Restarting or redeploying the webapp never interrupts collection. If the
-poller is stopped, `start` resumes it on the same schedule — there is no
-resume state to manage, since everything collected is already in SQLite.
+Logs: `data/poller.log`, `data/webapp.log`.
 
-**These are `nohup` processes: they survive a terminal closing but not a
-reboot.** For genuinely unattended running:
-
-```bash
-./scripts/install_systemd.sh    # needs sudo; Restart=always, survives reboot
-```
+If the poller is stopped, starting it resumes on the same schedule — there
+is no resume state, since everything collected is already in SQLite. What a
+gap costs: the inverter's energy total survives (its own counter keeps
+counting, and the day's baseline spans gaps up to 12 h), but per-panel
+readings from the gap are lost, because SolarEdge's live endpoint only ever
+shows each optimizer's latest measurement.
 
 ## Health checks
 

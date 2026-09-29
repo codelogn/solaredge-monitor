@@ -75,9 +75,10 @@ tail -5 data/poller.log
 venv/bin/python -m pytest tests/ -q
 ```
 
-Both processes are `nohup` background jobs — they survive a closed terminal
-but not a reboot. `./scripts/install_systemd.sh` (needs sudo) installs the
-collector as a service that restarts on boot and on failure.
+For unattended running, `./scripts/install_systemd.sh` (needs sudo) installs
+both as systemd services that start at boot and restart on failure; the ctl
+scripts then drive those services. Without it they run as `nohup`
+background jobs, which don't survive a reboot.
 
 ## Security
 

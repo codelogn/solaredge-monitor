@@ -4,6 +4,28 @@
 # this never interrupts data capturing; it only re-reads the same SQLite file.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+# Once installed as a service (scripts/install_systemd.sh), systemd owns the
+# process and restarts it at boot; drive it through systemctl so a second,
+# unmanaged copy can never be started alongside it.
+UNIT=solarmonitor-web
+if [ -f "/etc/systemd/system/$UNIT.service" ]; then
+  case "${1:-}" in
+    start|stop|restart)
+      sudo systemctl "$1" "$UNIT"
+      echo "Webapp $1: systemd service $UNIT is now $(systemctl is-active "$UNIT" || true)"
+      ;;
+    status)
+      if systemctl is-active --quiet "$UNIT"; then
+        echo "Webapp running (systemd service $UNIT, pid $(systemctl show -p MainPID --value "$UNIT"), starts at boot)"
+      else
+        echo "Webapp not running (systemd service $UNIT: $(systemctl is-active "$UNIT" || true))"
+      fi
+      ;;
+    *) echo "Usage: $0 {start|stop|restart|status}" >&2; exit 1 ;;
+  esac
+  exit 0
+fi
 PIDFILE=data/webapp.pid
 LOGFILE=data/webapp.log
 PORT="${SOLARMONITOR_WEBAPP_PORT:-8090}"
