@@ -60,7 +60,7 @@
 </style>
 </head>
 <body>
-  <h1>SolarMonitor</h1>
+  <h1>Dashboard</h1>
   <div class="subtitle">Site optimizer voltage/current dashboard — auto-refreshes every 30s</div>
   <div id="srcLegend"></div>
   <div id="dataHealth"></div>
@@ -70,7 +70,7 @@
   <section>
     <h2>
       <span>Inverter today — real time over your LAN &amp; cloud upload delay<span data-acc="9"></span></span>
-      <span class="muted" style="font-weight:400; font-size:12px;"><span id="invSampling"></span> · <a href="inverter.html" style="color:var(--accent)">daily history →</a></span>
+      <span class="muted" style="font-weight:400; font-size:12px;"><span id="invSampling"></span> · <a href="inverter.html" style="color:var(--accent)">7 days hour by hour & daily history →</a></span>
     </h2>
     <div class="cards" id="inverterCards" style="margin-bottom:12px;"></div>
     <div class="muted" style="font-size:12px; margin-bottom:10px; line-height:1.5;">
@@ -86,7 +86,8 @@
 
   <section>
     <h2>
-      <span>Optimizers — latest reading via the internet (can lag)<span data-acc="1"></span><span data-acc="2"></span> <span data-src="se"></span></span>
+      <span>Optimizers — latest reading via the internet (can lag)<span data-acc="1"></span><span data-acc="2"></span> <span data-src="se"></span>
+        <a href="hourly.html" style="font-weight:400; font-size:12px; color:var(--accent); margin-left:8px">hourly ranking →</a></span>
       <span class="muted" style="font-weight:400; font-size:12px;">click a row for full history →</span>
     </h2>
     <div id="seLagOptimizers"></div>
@@ -96,6 +97,7 @@
       optimizer took it, not when we stored it. A brand-new database will still show old
       timestamps here if the hardware hasn't produced anything since.
     </div>
+    <div class="scroll-x">
     <table id="optimizersTable">
       <thead>
         <tr>
@@ -106,11 +108,14 @@
           <th data-key="optimizer_voltage" class="num from-se">Opt. Voltage (V)</th>
           <th data-key="current" class="num from-se">Current (A)</th>
           <th data-key="power" class="num from-se">Power (W)<span data-acc="1"></span></th>
+          <th data-key="today_wh" class="num from-calc" title="Estimated energy today (inverter's energy shared out); measured if no estimate">Energy today (Wh)<span data-acc="14"></span></th>
           <th data-key="latest_status" class="from-calc">Last Cycle</th>
         </tr>
       </thead>
       <tbody></tbody>
+      <tfoot id="optimizersFoot"></tfoot>
     </table>
+    </div>
   </section>
 
   <section>
@@ -133,7 +138,8 @@
     <div id="seLagHealth"></div>
     <div class="muted" style="font-size:12px; margin-bottom:10px; line-height:1.5;">
       <b>vs Peers</b> is this optimizer's <i>average power over all its readings in a 15-minute
-      window</i>, as a % of the median of its own <b>panel-model group</b> in the same window — so
+      window</i>, as a % of the median of its <b>peers</b> in the same window
+      (<span id="peerBasis">whole array</span>) — so
       sun angle and cloud cancel out, and 100% means "producing like its neighbours". Every reading
       counts, including near-zero ones: checked against the inverter's own DC power, those are real.
       <b>Score</b> multiplies output-vs-peers by reporting reliability, so neither problem can
@@ -158,7 +164,7 @@
         <tr>
           <th rowspan="2" data-key="serial" class="from-se">Serial</th>
           <th rowspan="2" data-key="label" class="from-se">Pos</th>
-          <th rowspan="2" data-key="panel_model" class="from-se">Group</th>
+          <th rowspan="2" data-key="group" class="from-calc" title="Which panels it's compared with — set by PANEL_GROUPS; whole array by default">Compared with</th>
           <th rowspan="2" data-key="health_score" class="from-calc">Verdict<span data-acc="4"></span></th>
           <th rowspan="2" data-key="health_score" class="num from-calc">Score</th>
           <th rowspan="2" data-key="perf_ratio_pct" class="num from-calc">vs Peers<span data-acc="4"></span></th>
@@ -390,10 +396,38 @@ async function loadOptimizers() {
   renderOptimizers(rows);
 }
 
+// Today's energy for one panel: the estimate (inverter's energy shared out)
+// when there is one, otherwise the panel's own measured energy, flagged. Low
+// coverage means part of today's per-panel data hasn't arrived from SolarEdge.
+function todayEnergyCell(r) {
+  if (r.today_wh == null) return `<td class="num muted">—</td>`;
+  const est = r.today_estimated_wh != null;
+  const cov = r.today_coverage_pct;
+  const tip = `estimated ${est ? Math.round(r.today_estimated_wh) + " Wh" : "— (inverter not read all day)"}` +
+    ` · measured ${Math.round(r.today_measured_wh ?? 0)} Wh · coverage ${cov ?? "—"}%`;
+  return `<td class="num" title="${tip}">${Math.round(r.today_wh).toLocaleString()}` +
+    (est ? "" : ` <span class="muted" style="font-size:11px">measured</span>`) +
+    (cov != null && cov < 90 ? ` <span class="badge warn" style="font-size:10px; padding:0 6px">${Math.round(cov)}% cov.</span>` : "") +
+    `</td>`;
+}
+
+function renderOptimizerTotals(rows) {
+  const vals = rows.map(r => r.today_wh).filter(v => v != null);
+  const foot = document.getElementById("optimizersFoot");
+  if (!vals.length) { foot.innerHTML = ""; return; }
+  const total = vals.reduce((a, b) => a + b, 0);
+  const allEstimated = rows.every(r => r.today_wh == null || r.today_estimated_wh != null);
+  foot.innerHTML = `<tr>
+    <td colspan="7" class="num muted" style="font-weight:500">All panels today${allEstimated ? " — adds up to the inverter's own measured energy" : " (some measured only)"}
+      · <a href="hourly.html" style="color:var(--accent)">hour by hour →</a></td>
+    <td class="num" style="font-weight:600">${(total / 1000).toFixed(2)} kWh</td>
+    <td></td></tr>`;
+}
+
 function renderOptimizers(rows) {
   const tbody = document.querySelector("#optimizersTable tbody");
   if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="8" class="empty">No optimizers discovered yet.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" class="empty">No optimizers discovered yet.</td></tr>`;
     return;
   }
   tbody.innerHTML = rows.map(r => {
@@ -407,9 +441,11 @@ function renderOptimizers(rows) {
       <td class="num">${fmt(r.optimizer_voltage)}</td>
       <td class="num">${fmt(r.current, 3)}</td>
       <td class="num">${fmt(r.power, 1)}</td>
+      ${todayEnergyCell(r)}
       <td><span class="badge ${cls}">${st}</span></td>
     </tr>`;
   }).join("");
+  renderOptimizerTotals(rows);
   tbody.querySelectorAll("tr[data-serial]").forEach(tr => {
     tr.addEventListener("click", () => openOptimizer(tr.dataset.serial));
   });
@@ -448,6 +484,11 @@ async function loadSummary() {
   const hod = document.getElementById("hourSelect").value;
   const data = await getJSON(
     `/api/health?hours=${hours}` + (hod !== "" ? `&hour_of_day=${hod}` : ""));
+  const g = data.grouping || {};
+  document.getElementById("peerBasis").innerHTML = g.mode === "array"
+    ? `the whole array — every panel against every other; set <code>PANEL_GROUPS</code> to compare within roof faces`
+    : g.label;
+  if (g.error) document.getElementById("peerBasis").innerHTML += ` <span style="color:var(--warn)">— ${g.error}</span>`;
   document.getElementById("cycleFilterNote").innerHTML =
     `Scored on <b>${data.scored_windows}</b> ${data.window_minutes}-minute window${data.scored_windows === 1 ? "" : "s"} of
      usable light. Skipped <b>${data.excluded_weak_light}</b> too dark or dim
@@ -499,7 +540,7 @@ function renderSummary(rows) {
     return `<tr data-serial="${r.serial}" style="cursor:pointer">
       <td>${r.serial}</td>
       <td>${posOf(r.label)}</td>
-      <td class="muted">${r.panel_model ?? "—"}</td>
+      <td class="muted">${r.group ?? "whole array"}</td>
       <td><span class="badge ${vCls}">${r.verdict}</span></td>
       <td class="num">${r.health_score}</td>
       <td class="num">${pctBadge(r.perf_ratio_pct, 85, 60)}</td>

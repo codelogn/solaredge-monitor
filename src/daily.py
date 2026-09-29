@@ -128,7 +128,8 @@ def refresh(db_path: Path, tz_name: str, today: date | None = None) -> list[str]
 
 
 def run_maintenance(db_path: Path, tz_name: str, retention_days: int,
-                    optimizer_retention_days: int = 0, decommissioned=frozenset()) -> None:
+                    optimizer_retention_days: int = 0, decommissioned=frozenset(),
+                    grouping=None) -> None:
     """Daily roll-ups, then raw retention. Inverter first (per-panel
     estimates use its daily energy), and roll-ups before pruning, so a day is
     always summarised before its raw readings can be deleted."""
@@ -137,7 +138,7 @@ def run_maintenance(db_path: Path, tz_name: str, retention_days: int,
     days = refresh(db_path, tz_name)
     if days:
         logger.info("Inverter daily history updated: %s", ", ".join(days))
-    pdays = panel_daily.refresh(db_path, tz_name, decommissioned)
+    pdays = panel_daily.refresh(db_path, tz_name, decommissioned, grouping=grouping)
     if pdays:
         logger.info("Per-panel daily history updated: %s", ", ".join(pdays))
     if retention_days > 0:

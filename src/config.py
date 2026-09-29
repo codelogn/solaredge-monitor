@@ -42,6 +42,10 @@ class Config:
     # Days of raw per-optimizer readings to keep. The per-panel daily
     # summary (panel_daily) is kept forever regardless. 0 = keep everything.
     optimizer_retention_days: int
+    # Which panels are compared with each other — see src/groups.py. Empty =
+    # whole array; "solaredge" = SolarEdge's panel-model labels; or custom
+    # groups by layout position, e.g. "South=1.0.1-1.0.10; North=1.0.17-1.0.24".
+    panel_groups: str
     # Optimizers physically removed/replaced. They remain in SolarEdge's
     # layout forever and would otherwise sit at the bottom of every report
     # as NO DATA, hiding real faults behind known-dead hardware.
@@ -72,6 +76,7 @@ class Config:
             array_nameplate_w=int(os.environ.get("ARRAY_NAMEPLATE_W", "0") or 0),
             inverter_retention_days=int(os.environ.get("INVERTER_RETENTION_DAYS", "365") or 0),
             optimizer_retention_days=int(os.environ.get("OPTIMIZER_RETENTION_DAYS", "365") or 0),
+            panel_groups=os.environ.get("PANEL_GROUPS", ""),
             decommissioned=frozenset(
                 s.strip() for s in os.environ.get("DECOMMISSIONED_SERIALS", "").split(",")
                 if s.strip()

@@ -6,6 +6,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from datetime import datetime, timedelta, timezone
 
 from src import analysis, db
+from src import groups
+
+BY_LABEL = groups.parse("solaredge")
 
 # Rows carry a plausible energy_wh, but scoring deliberately ignores it —
 # it's compared on power (see src/analysis.py).
@@ -97,12 +100,36 @@ def test_panels_are_compared_within_their_own_model_group(tmp_path):
         cycles.append(c)
     _build_grouped(db_path, cycles, models)
 
-    res = _by_serial(analysis.score_optimizers(db_path, hours=99999))
+    res = _by_serial(analysis.score_optimizers(db_path, hours=99999, grouping=BY_LABEL))
 
     for n in range(6):
         assert res[f"BIG-{n}"]["perf_ratio_pct"] == 100.0
         assert res[f"SMALL-{n}"]["perf_ratio_pct"] == 100.0
         assert res[f"SMALL-{n}"]["verdict"] == "GOOD", res[f"SMALL-{n}"]
+
+
+def test_default_compares_every_panel_with_the_whole_array(tmp_path):
+    db_path = tmp_path / "t.db"
+    # Same two labelled groups as above, but no grouping configured: labels
+    # typed in by an installer mustn't decide who a panel's peers are.
+    models = {}
+    for n in range(6):
+        models[f"BIG-{n}"] = "REC 365"
+        models[f"SMALL-{n}"] = "REC"
+    cycles = []
+    for _ in range(12):
+        c = {f"BIG-{n}": 250.0 for n in range(6)}
+        c.update({f"SMALL-{n}": 100.0 for n in range(6)})
+        cycles.append(c)
+    _build_grouped(db_path, cycles, models)
+
+    result = analysis.score_optimizers(db_path, hours=99999)
+    res = _by_serial(result)
+
+    assert result["grouping"]["mode"] == "array"
+    # Whole-array median of six 250s and six 100s is 175.
+    assert 57 < res["SMALL-0"]["perf_ratio_pct"] < 58
+    assert res["SMALL-0"]["group"] is None
 
 
 def test_a_weak_panel_is_still_caught_inside_its_group(tmp_path):
@@ -120,7 +147,7 @@ def test_a_weak_panel_is_still_caught_inside_its_group(tmp_path):
         cycles.append(c)
     _build_grouped(db_path, cycles, models)
 
-    res = _by_serial(analysis.score_optimizers(db_path, hours=99999))
+    res = _by_serial(analysis.score_optimizers(db_path, hours=99999, grouping=BY_LABEL))
 
     assert 28 < res["WEAK"]["perf_ratio_pct"] < 32
     assert res["WEAK"]["verdict"] in ("BAD", "SUSPECT")
@@ -141,7 +168,7 @@ def test_small_group_falls_back_to_the_array_median(tmp_path):
         cycles.append(c)
     _build_grouped(db_path, cycles, models)
 
-    res = _by_serial(analysis.score_optimizers(db_path, hours=99999))
+    res = _by_serial(analysis.score_optimizers(db_path, hours=99999, grouping=BY_LABEL))
 
     # Compared against the whole array rather than its single peer.
     assert res["ODD-1"]["perf_ratio_pct"] == 100.0

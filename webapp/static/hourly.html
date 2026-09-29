@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SolarMonitor — Hourly Panel Ranking</title>
+<link rel="stylesheet" href="sources.css">
+<script src="sources.js"></script>
+<style>
+  :root {
+    --bg: #0f1420; --panel: #161d2e; --panel-2: #1c2438; --border: #2a3450;
+    --text: #e6ebf5; --muted: #8b95ab; --accent: #4f8cff;
+    --ok: #2ecc71; --warn: #f5a623; --bad: #e5484d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    background: var(--bg); color: var(--text); padding: 24px; max-width: 1400px; margin: 0 auto;
+  }
+  @media (max-width: 700px) { body { padding: 16px; } }
+  a { color: var(--accent); text-decoration: none; }
+  h1 { font-size: 20px; margin: 10px 0 2px; }
+  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; margin-bottom: 20px; }
+  section h2 { font-size: 15px; margin: 0 0 12px; display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+  .muted { color: var(--muted); }
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 16px; }
+  .controls label { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  select, input[type=date] { background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 5px 10px; font-size: 13px; color-scheme: dark; }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .seg button { background: var(--panel-2); color: var(--muted); border: 0; padding: 6px 12px; font-size: 13px; cursor: pointer; }
+  .seg button.active { background: rgba(79,140,255,0.18); color: var(--text); }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .badge.ok { background: rgba(46,204,113,0.15); color: var(--ok); }
+  .badge.warn { background: rgba(245,166,35,0.15); color: var(--warn); }
+  .badge.muted { background: rgba(139,149,171,0.15); color: var(--muted); }
+  .desc { font-size: 12px; color: var(--muted); line-height: 1.5; margin: 0 0 12px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; margin-bottom: 12px; }
+  .chips b { font-size: 15px; }
+  .banner { font-size: 12px; line-height: 1.5; padding: 8px 12px; border-radius: 8px; margin: 0 0 12px;
+    color: #fcd34d; border: 1px solid rgba(245,166,35,0.5); background: rgba(245,166,35,0.08); }
+  .scroll-x { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 9px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; }
+  th.sortable { cursor: pointer; user-select: none; }
+  th.sortable:hover { color: var(--text); }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .rank { width: 64px; font-variant-numeric: tabular-nums; }
+  .medal { font-size: 15px; }
+  .bar-cell { min-width: 220px; }
+  @media (max-width: 700px) {
+    .bar-cell { min-width: 0; } th, td { padding: 6px 5px; } .hide-sm { display: none; }
+    section { padding: 12px; } #hourTable th { white-space: normal; } .rank { width: auto; }
+    .bar-val { min-width: 34px; }
+  }
+  .bar-wrap { display: flex; align-items: center; gap: 8px; }
+  .bar { height: 12px; background: var(--accent); border-radius: 0 4px 4px 0; min-width: 2px; }
+  .bar-val { font-variant-numeric: tabular-nums; min-width: 44px; }
+  tr.group-sep td { background: var(--panel-2); color: var(--muted); font-size: 12px; font-weight: 600; padding: 4px 9px; }
+  /* day grid */
+  table.grid { border-collapse: separate; border-spacing: 2px; width: auto; }
+  table.grid th, table.grid td { border: 0; padding: 4px 6px; font-size: 12px; text-align: center; }
+  table.grid td.cell { border-radius: 3px; min-width: 44px; font-variant-numeric: tabular-nums; cursor: default; }
+  table.grid th.hour { cursor: pointer; color: var(--muted); }
+  table.grid th.hour:hover { color: var(--accent); }
+  table.grid th.hour.unscored, table.grid td.unscored { opacity: .45; }
+  table.grid .rowhead { position: sticky; left: 0; background: var(--panel); text-align: left; z-index: 1; }
+  table.grid td.stat { font-variant-numeric: tabular-nums; color: var(--text); }
+  .legend-bar { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); margin-top: 10px; flex-wrap: wrap; }
+  .ramp { width: 140px; height: 10px; border-radius: 2px; }
+  .empty { color: var(--muted); font-size: 13px; padding: 12px 0; }
+</style>
+</head>
+<body>
+  <h1>Hourly panel ranking</h1>
+  <div class="subtitle">Every panel's energy, hour by hour — who produced most, and how each panel ranks.
+    <a href="panels.html">Daily panel history →</a></div>
+  <div id="srcLegend"></div>
+
+  <div class="controls">
+    <label>Date <input type="date" id="dateInput"></label>
+    <label>Hour <select id="hourSelect"><option value="">All day</option></select></label>
+    <label>Rank against
+      <span class="seg" id="basisSeg">
+        <button data-basis="all" class="active" title="Whole array: who actually produced the most">Whole array</button>
+        <button data-basis="group" title="Within each group from PANEL_GROUPS (e.g. roof faces): cancels orientation, better for spotting problems">Within group</button>
+      </span>
+    </label>
+  </div>
+
+  <section id="hourSection" hidden>
+    <h2><span id="hourTitle">—</span><span id="hourTags"></span></h2>
+    <div id="hourBanner"></div>
+    <div class="chips" id="hourChips"></div>
+    <div class="scroll-x"><table id="hourTable"></table></div>
+  </section>
+
+  <section id="daySection" hidden>
+    <h2><span id="dayTitle">—</span><span id="dayTags"></span></h2>
+    <p class="desc" id="dayDesc"></p>
+    <div class="scroll-x"><table class="grid" id="dayGrid"></table></div>
+    <div class="legend-bar" id="dayLegend"></div>
+  </section>
+
+  <section>
+    <h2>
+      <span>Leaderboard<span data-acc="15"></span> <span data-src="calc" data-from="se"></span></span>
+      <select id="rangeSelect">
+        <option value="7">Last 7 days</option>
+        <option value="30" selected>Last 30 days</option>
+        <option value="90">Last 90 days</option>
+        <option value="365">Last 365 days</option>
+      </select>
+    </h2>
+    <p class="desc" id="boardDesc"></p>
+    <div class="scroll-x"><table id="boardTable"></table></div>
+  </section>
+
+  <div id="accKeyHolder"></div>
+
+<script>
+const params = new URLSearchParams(location.search);
+let basis = params.get("basis") === "group" ? "group" : "all";
+let day = null, board = null, boardSort = { key: "wins", dir: -1 };
+
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+const pos = label => (label || "").replace("Optimizer ", "").split(" ")[0];
+const posKey = label => pos(label).split(".").map(n => n.padStart(4, "0")).join(".");
+function hourLabel(h) {
+  const f = x => `${x % 12 === 0 ? 12 : x % 12} ${x < 12 || x === 24 ? "AM" : "PM"}`;
+  return `${f(h)} – ${f(h + 1)}`;
+}
+const shortHour = h => `${h % 12 === 0 ? 12 : h % 12}${h < 12 ? "a" : "p"}`;
+function dayLabel(d) {
+  return new Date(d + "T12:00:00Z").toLocaleDateString([], { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
+}
+const fmt = (n, d = 0) => n == null ? "—" : Number(n).toFixed(d);
+const rankKey = () => basis === "group" ? "rank_group" : "rank_all";
+const medal = r => ({ 1: "🏆", 2: "🥈", 3: "🥉" })[r] || "";
+function setParam(k, v) {
+  const u = new URL(location.href);
+  if (v === null || v === "") u.searchParams.delete(k); else u.searchParams.set(k, v);
+  window.history.replaceState(null, "", u);
+}
+// Sequential single-hue scale for "% of the hour's best": low values sit near
+// the surface, high values are saturated blue.
+function seq(t) {
+  t = Math.max(0, Math.min(1, t));
+  const mix = (a, b) => Math.round(a + (b - a) * t);
+  return `rgb(${mix(28, 47)}, ${mix(36, 110)}, ${mix(56, 235)})`;
+}
+
+// Reference for "% of best": the hour's best overall, or best in the panel's
+// own group when ranking within groups.
+function bestFor(serial, per, groups) {
+  const vals = Object.entries(per).filter(([s]) => basis === "all" || groups[s] === groups[serial])
+    .map(([, f]) => f.measured_wh || 0);
+  return Math.max(0, ...vals);
+}
+
+async function loadDay() {
+  const date = document.getElementById("dateInput").value;
+  day = await getJSON(`/api/panels/hourly${date ? `?date=${date}` : ""}`);
+  if (!date) document.getElementById("dateInput").value = day.date;
+  const sel = document.getElementById("hourSelect");
+  const want = params.get("hour") ?? sel.value;
+  sel.innerHTML = `<option value="">All day</option>` + day.hours.map(h =>
+    `<option value="${h.hour}">${hourLabel(h.hour)}${h.scored ? "" : " (not ranked)"}</option>`).join("");
+  if (day.hours.some(h => String(h.hour) === String(want))) sel.value = want;
+  params.delete("hour");
+  render();
+}
+
+// "Within group" needs groups: with the whole-array default it would just
+// repeat the whole-array ranking, so the button is disabled with a pointer
+// to PANEL_GROUPS.
+function applyGrouping(g) {
+  const btn = document.querySelector('#basisSeg button[data-basis="group"]');
+  const off = !g || g.mode === "array";
+  btn.disabled = off;
+  btn.style.opacity = off ? 0.45 : 1;
+  btn.style.cursor = off ? "not-allowed" : "pointer";
+  btn.title = off
+    ? "No groups set — every panel is compared with the whole array. Set PANEL_GROUPS in .env (e.g. by roof face) to enable this."
+    : `Within each group (${g.label}): cancels orientation, better for spotting problems`;
+  if (off && basis === "group") {
+    basis = "all";
+    document.querySelectorAll("#basisSeg button").forEach(x => x.classList.toggle("active", x.dataset.basis === "all"));
+  }
+}
+
+function render() {
+  applyGrouping(day.grouping);
+  const h = document.getElementById("hourSelect").value;
+  setParam("hour", h); setParam("date", day.date); setParam("basis", basis === "group" ? "group" : null);
+  document.getElementById("hourSection").hidden = h === "";
+  document.getElementById("daySection").hidden = h !== "";
+  if (h === "") renderDay(); else renderHour(Number(h));
+}
+
+function renderHour(h) {
+  const info = day.hours.find(x => x.hour === h);
+  const per = day.values[String(h)] || {};
+  const opts = Object.fromEntries(day.optimizers.map(o => [o.serial, o]));
+  const groups = Object.fromEntries(day.optimizers.map(o => [o.serial, o.group || ""]));
+  const rk = rankKey();
+  document.getElementById("hourTitle").innerHTML =
+    `${hourLabel(h)} · ${dayLabel(day.date)}${acc(15)}`;
+  document.getElementById("hourTags").innerHTML = src("calc", "se");
+  document.getElementById("hourBanner").innerHTML = info && info.scored ? "" :
+    `<div class="banner">⚠ <b>Not ranked.</b> ${info && info.missing_panels
+      ? `${info.missing_panels} panel${info.missing_panels === 1 ? "'s" : "s'"} data is incomplete for this hour`
+      : "The array wasn't producing enough this hour to compare panels fairly"} — energy is shown, but no
+      winner is named.</div>`;
+  const measured = Object.values(per).reduce((a, f) => a + (f.measured_wh || 0), 0);
+  document.getElementById("hourChips").innerHTML = `
+    <span>Inverter this hour${acc(7)} ${src("inv")} <b>${info && info.inverter_wh != null ? fmt(info.inverter_wh) + " Wh" : "—"}</b></span>
+    <span>Panels' own total ${src("se")} <b>${fmt(measured)} Wh</b></span>`;
+
+  let rows = Object.entries(per).map(([s, f]) => ({ serial: s, ...f, label: opts[s]?.label, group: groups[s] }));
+  const byEnergy = (a, b) => (b.measured_wh || 0) - (a.measured_wh || 0);
+  if (basis === "group") rows.sort((a, b) => a.group.localeCompare(b.group) || byEnergy(a, b));
+  else rows.sort(byEnergy);
+  const top = Math.max(1, ...rows.map(r => r.measured_wh || 0));
+  const barMax = window.innerWidth < 700 ? 60 : 160;
+  let lastGroup = null;
+  const body = rows.map(r => {
+    const best = bestFor(r.serial, per, groups);
+    const pct = best ? 100 * (r.measured_wh || 0) / best : null;
+    const sep = basis === "group" && r.group !== lastGroup
+      ? `<tr class="group-sep"><td colspan="7">${r.group || "No group"}</td></tr>` : "";
+    lastGroup = r.group;
+    const rank = r[rk];
+    const tip = `estimated ${r.estimated_wh != null ? fmt(r.estimated_wh) + " Wh (inverter's hour shared out)" : "—"}`;
+    return `${sep}<tr>
+      <td class="rank">${rank != null ? `<span class="medal">${medal(rank)}</span> #${rank}` : `<span class="muted">—</span>`}</td>
+      <td><a href="optimizer.html?serial=${encodeURIComponent(r.serial)}">${pos(r.label)}</a></td>
+      <td class="muted hide-sm">${r.group || "—"}</td>
+      <td class="bar-cell" title="${tip}"><div class="bar-wrap">
+        <div class="bar" style="width:${Math.round(barMax * (r.measured_wh || 0) / top)}px"></div>
+        <span class="bar-val">${fmt(r.measured_wh, 1)}</span></div></td>
+      <td class="num">${pct == null ? "—" : fmt(pct) + "%"}</td>
+      <td class="num hide-sm">${fmt(r.avg_power_w)}</td>
+      <td class="num">${r.coverage_pct == null ? "—" : fmt(r.coverage_pct) + "%"}</td>
+    </tr>`;
+  }).join("");
+  document.getElementById("hourTable").innerHTML = `<thead><tr>
+      <th class="rank">Rank</th><th>Panel</th><th class="hide-sm">Group</th>
+      <th>Energy (Wh)${acc(14)}</th>
+      <th class="num">${basis === "group" ? "% of group best" : "% of hour's best"}</th>
+      <th class="num hide-sm">Avg W</th><th class="num">Coverage</th>
+    </tr></thead><tbody>${body || `<tr><td colspan="7" class="empty">No readings for this hour.</td></tr>`}</tbody>`;
+}
+
+function renderDay() {
+  const rk = rankKey();
+  const opts = [...day.optimizers];
+  const groups = Object.fromEntries(opts.map(o => [o.serial, o.group || ""]));
+  const dayBoard = day.day_board[basis] || {};
+  const scored = day.hours.filter(h => h.scored).length;
+  document.getElementById("dayTitle").innerHTML = `${dayLabel(day.date)} — every hour${acc(15)}`;
+  document.getElementById("dayTags").innerHTML = src("calc", "se");
+  document.getElementById("dayDesc").innerHTML =
+    `Each cell is the panel's energy (Wh) that hour; shading is its share of the hour's best
+     ${basis === "group" ? "<b>in its own panel group</b>" : "<b>across the whole array</b>"} (brighter = closer to best).
+     🏆 marks the hour's winner. ${scored} of ${day.hours.length} hours are ranked; faded columns aren't
+     (a panel's data was incomplete, or the array wasn't producing enough). Click an hour for its ranked list.`;
+  opts.sort((a, b) => {
+    const A = dayBoard[a.serial] || {}, B = dayBoard[b.serial] || {};
+    return (B.wins || 0) - (A.wins || 0) || (A.avg_rank ?? 99) - (B.avg_rank ?? 99) || posKey(a.label).localeCompare(posKey(b.label));
+  });
+  const head = `<tr><th class="rowhead">Panel</th>${day.hours.map(h =>
+      `<th class="hour ${h.scored ? "" : "unscored"}" data-hour="${h.hour}" title="${hourLabel(h.hour)}${h.scored ? "" : " — not ranked"}">${shortHour(h.hour)}</th>`).join("")}
+    <th title="Hours ranked #1">🏆 Wins</th><th title="Hours ranked #1–3">Top 3</th><th title="Average rank over ranked hours (1 = best)">Avg rank</th></tr>`;
+  const body = opts.map(o => {
+    const cells = day.hours.map(h => {
+      const per = day.values[String(h.hour)] || {};
+      const f = per[o.serial];
+      if (!f) return `<td class="cell muted">·</td>`;
+      const best = bestFor(o.serial, per, groups);
+      const t = best ? (f.measured_wh || 0) / best : 0;
+      const win = h.scored && f[rk] === 1;
+      const tip = `${pos(o.label)} · ${hourLabel(h.hour)}: ${fmt(f.measured_wh, 1)} Wh` +
+        (f[rk] != null ? ` · rank #${f[rk]}` : " · not ranked") + ` · coverage ${fmt(f.coverage_pct)}%`;
+      return `<td class="cell ${h.scored ? "" : "unscored"}" style="background:${seq(t)}; color:${t > 0.55 ? "#fff" : "var(--muted)"}"
+        title="${tip}">${fmt(f.measured_wh)}${win ? `<span style="font-size:10px"> 🏆</span>` : ""}</td>`;
+    }).join("");
+    const b = dayBoard[o.serial] || {};
+    return `<tr><td class="rowhead"><a href="optimizer.html?serial=${encodeURIComponent(o.serial)}">${pos(o.label)}</a>
+      <span class="muted" style="font-size:11px">${groups[o.serial]}</span></td>${cells}
+      <td class="stat">${b.wins ?? 0}</td><td class="stat">${b.top3 ?? 0}</td><td class="stat">${b.avg_rank != null ? fmt(b.avg_rank, 1) : "—"}</td></tr>`;
+  }).join("");
+  document.getElementById("dayGrid").innerHTML = day.hours.length
+    ? `<thead>${head}</thead><tbody>${body}</tbody>`
+    : `<tbody><tr><td class="empty">No per-panel data for this day.</td></tr></tbody>`;
+  document.querySelectorAll("#dayGrid th.hour").forEach(th => th.addEventListener("click", () => {
+    document.getElementById("hourSelect").value = th.dataset.hour; render();
+  }));
+  document.getElementById("dayLegend").innerHTML = `
+    <span>0%</span><span class="ramp" style="background:linear-gradient(90deg, ${seq(0)}, ${seq(0.5)}, ${seq(1)})"></span>
+    <span>100% of ${basis === "group" ? "group" : "hour's"} best</span>
+    <span style="margin-left:14px">🏆 hour winner</span>
+    <span style="margin-left:14px">faded = hour not ranked</span>
+    <span style="margin-left:14px">hover a cell for details</span>`;
+}
+
+async function loadBoard() {
+  const days = document.getElementById("rangeSelect").value;
+  board = await getJSON(`/api/panels/leaderboard?days=${days}`);
+  renderBoard();
+}
+
+function renderBoard() {
+  const b = board[basis] || {};
+  document.getElementById("boardDesc").innerHTML =
+    `${board.scored_hours} ranked hour${board.scored_hours === 1 ? "" : "s"} in this range.
+     <b>Wins</b> = hours at #1, <b>Top 3</b> = hours in the top three, <b>Avg rank</b> = average position (1 = best).
+     ${basis === "group"
+       ? "Ranked <b>within each group</b> from PANEL_GROUPS — with roof-face groups this cancels orientation, so a panel that sits low here is the one to check for shade or a fault."
+       : "Ranked across the <b>whole array</b>, so well-placed panels dominate — this mostly shows roof placement. Switch to <i>Within group</i> to look for problems."}
+     The best panels often finish within 1–2% of each other, so top-3 and average rank are steadier than wins.`;
+  let rows = board.optimizers.map(o => ({ ...o, ...(b[o.serial] || { wins: 0, top3: 0, avg_rank: null, scored_hours: 0 }) }));
+  const k = boardSort.key, dir = boardSort.dir;
+  rows.sort((x, y) => {
+    const a = x[k], c = y[k];
+    if (k === "label") return dir * posKey(x.label).localeCompare(posKey(y.label));
+    if (a == null) return 1; if (c == null) return -1;
+    return dir * (a - c) || (x.avg_rank ?? 99) - (y.avg_rank ?? 99);
+  });
+  const th = (key, label, cls = "num") =>
+    `<th class="sortable ${cls}" data-key="${key}">${label}${boardSort.key === key ? (boardSort.dir < 0 ? " ▾" : " ▴") : ""}</th>`;
+  document.getElementById("boardTable").innerHTML = `<thead><tr>
+      ${th("label", "Panel", "")}<th>Group</th>${th("wins", "🏆 Wins")}${th("top3", "Top 3")}
+      ${th("avg_rank", "Avg rank")}${th("scored_hours", "Ranked hours")}</tr></thead>
+    <tbody>${rows.map(r => `<tr>
+      <td><a href="optimizer.html?serial=${encodeURIComponent(r.serial)}">${pos(r.label)}</a></td>
+      <td class="muted">${r.group || "—"}</td>
+      <td class="num">${r.wins}</td><td class="num">${r.top3}</td>
+      <td class="num">${r.avg_rank != null ? fmt(r.avg_rank, 2) : "—"}</td>
+      <td class="num muted">${r.scored_hours}</td></tr>`).join("")}</tbody>`;
+  document.querySelectorAll("#boardTable th.sortable").forEach(el => el.addEventListener("click", () => {
+    const key = el.dataset.key;
+    // Wins/top-3 read best high-first; avg rank and panel read best low-first.
+    const natural = key === "avg_rank" || key === "label" ? 1 : -1;
+    boardSort = boardSort.key === key ? { key, dir: -boardSort.dir } : { key, dir: natural };
+    renderBoard();
+  }));
+}
+
+document.getElementById("srcLegend").innerHTML = srcLegend();
+document.getElementById("accKeyHolder").innerHTML = accKey([2, 7, 14, 15]);
+fillMarkers();
+if (params.get("date")) document.getElementById("dateInput").value = params.get("date");
+document.querySelectorAll("#basisSeg button").forEach(btn => {
+  btn.classList.toggle("active", btn.dataset.basis === basis);
+  btn.addEventListener("click", () => {
+    basis = btn.dataset.basis;
+    document.querySelectorAll("#basisSeg button").forEach(x => x.classList.toggle("active", x === btn));
+    render(); if (board) renderBoard();
+  });
+});
+document.getElementById("dateInput").addEventListener("change", () => { document.getElementById("hourSelect").value = ""; loadDay(); });
+document.getElementById("hourSelect").addEventListener("change", render);
+document.getElementById("rangeSelect").addEventListener("change", loadBoard);
+loadDay(); loadBoard();
+// Today's hours fill in as SolarEdge delivers them.
+setInterval(() => { if (day && day.is_today) loadDay(); }, 120000);
+</script>
+</body>
+</html>

@@ -13,7 +13,8 @@ the roof.
 - **Per-optimizer history** the SolarEdge app doesn't keep: voltage, current,
   power and interval energy every few minutes, for as long as you like.
 - **Peer-relative health verdicts** (GOOD … BAD) with an explicit confidence
-  level, comparing each optimizer with its panel-model group in the same
+  level, comparing each optimizer with its peers (the whole array, or your
+  own groups such as roof faces via `PANEL_GROUPS`) in the same
   15-minute window so weather and sun angle cancel out.
 - **Hour-by-hour profiles** that separate shade (a dip at certain hours)
   from a fault (low all day).
@@ -28,6 +29,9 @@ the roof.
   and an estimate that adds up to the inverter's total), output vs peers
   and data coverage, in a panels × days grid for spotting a panel that
   drifts down over weeks.
+- **Hourly ranking**: every panel's energy for any hour of any day, ranked
+  across the whole array or within its group, with each hour's winner and
+  a leaderboard of wins, top-3 finishes and average rank.
 - Every number on the dashboard is tagged with where it came from (inverter,
   SolarEdge, or computed) and flagged when it may not be exact, and live
   flags say when either source can't currently be trusted — for example

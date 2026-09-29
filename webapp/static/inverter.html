@@ -50,11 +50,32 @@
 </style>
 </head>
 <body>
-  <a href="/">&larr; Back to dashboard</a>
   <h1>Inverter history</h1>
   <div class="subtitle">One row per day, from the inverter's own readings over your LAN. Click a day
     (in the chart or the table) to see its full power curve.</div>
   <div id="srcLegend"></div>
+
+  <section id="weekSection">
+    <h2>
+      <span>Last 7 days — energy hour by hour<span data-acc="7"></span> <span data-src="calc" data-from="inv"></span></span>
+      <span class="tabs" id="weekMode">
+        <button class="tab active" data-mode="overlay" title="One line per day, over the hours of the day">Compare days</button>
+        <button class="tab" data-mode="timeline" title="The same 7 days as one continuous line">Timeline</button>
+      </span>
+    </h2>
+    <p class="desc" id="weekDesc"></p>
+    <div class="chart-wrap"><canvas id="weekChart"></canvas></div>
+    <p class="desc" id="weekNote" style="margin-top:8px;"></p>
+  </section>
+
+  <section id="cumSection">
+    <h2><span>Last 7 days — running total through the day<span data-acc="7"></span> <span data-src="calc" data-from="inv"></span></span></h2>
+    <p class="desc">Energy produced so far at each hour of the day, one line per day, from the inverter's
+      own counter — the line ends at the day's total. Compare today's line with earlier days to see whether
+      it's running ahead or behind at the same time of day. Hover an hour to compare days.</p>
+    <div class="chart-wrap"><canvas id="cumChart"></canvas></div>
+    <p class="desc" id="cumNote" style="margin-top:8px;"></p>
+  </section>
 
   <section>
     <h2>
@@ -175,6 +196,7 @@ const params = new URLSearchParams(location.search);
 let metric = METRICS[params.get("metric")] ? params.get("metric") : "energy";
 let selectedDay = params.get("day");
 let history = null, historyChart = null, dayChart = null;
+let week = null, weekChart = null, weekMode = "overlay", cumChart = null;
 
 function readPct(d) {
   const t = (d.reads_ok || 0) + (d.reads_failed || 0);
@@ -196,7 +218,7 @@ async function getJSON(url) {
 function renderTabs() {
   document.getElementById("tabs").innerHTML = Object.entries(METRICS).map(([k, m]) =>
     `<button class="tab ${k === metric ? "active" : ""}" data-metric="${k}">${m.title}</button>`).join("");
-  document.querySelectorAll(".tab").forEach(b => b.addEventListener("click", () => {
+  document.querySelectorAll("#tabs .tab").forEach(b => b.addEventListener("click", () => {
     metric = b.dataset.metric;
     const u = new URL(location.href); u.searchParams.set("metric", metric); history_replace(u);
     renderTabs(); renderHistoryChart();
@@ -353,6 +375,233 @@ fillMarkers();
 document.getElementById("rangeSelect").addEventListener("change", loadHistory);
 renderTabs();
 loadHistory();
+
+// ---- Last 7 days, hour by hour ------------------------------------------
+// Days are ordered, so they share one hue: older days dimmer, today brightest.
+function dayShade(i, n) {
+  const t = n > 1 ? i / (n - 1) : 1;
+  const mix = (a, b) => Math.round(a + (b - a) * t);
+  return `rgb(${mix(62, 170)}, ${mix(78, 212)}, ${mix(118, 255)})`;
+}
+// Names each line at its last point ("Fri", "Today") so days can be told
+// apart without hovering. Text uses the page's ink, not the line colour.
+const lineEndLabels = {
+  id: "lineEndLabels",
+  afterDatasetsDraw(chart) {
+    const { ctx } = chart;
+    const labels = [];
+    chart.data.datasets.forEach((ds, i) => {
+      const meta = chart.getDatasetMeta(i);
+      if (meta.hidden || !ds.endLabel) return;
+      let j = ds.data.length - 1;
+      while (j >= 0 && ds.data[j] == null) j--;
+      if (j < 0) return;
+      const pt = meta.data[j];
+      labels.push({ x: pt.x + 6, y: pt.y + 4, text: ds.endLabel, today: ds.isToday });
+    });
+    // Keep labels in the same top-to-bottom order as their lines: sort by
+    // position, then push each one down just enough to clear the one above.
+    labels.sort((a, b) => a.y - b.y);
+    const near = (a, b) => Math.abs(a.x - b.x) < 40;
+    for (let k = 1; k < labels.length; k++) {
+      if (near(labels[k], labels[k - 1]) && labels[k].y - labels[k - 1].y < 13) {
+        labels[k].y = labels[k - 1].y + 13;
+      }
+    }
+    // If that pushed the lowest labels below the plot, lift the stack back
+    // up (keeping the order) so none disappears under the axis.
+    const floor = chart.chartArea.bottom - 2;
+    for (let k = labels.length - 1; k >= 0; k--) {
+      const limit = k === labels.length - 1 || !near(labels[k], labels[k + 1]) ? floor : labels[k + 1].y - 13;
+      if (labels[k].y > limit) labels[k].y = limit;
+    }
+    ctx.save();
+    ctx.font = "600 11px -apple-system, Segoe UI, Roboto, Arial, sans-serif";
+    ctx.textAlign = "left";
+    labels.forEach(l => {
+      ctx.fillStyle = l.today ? "#e6ebf5" : "#8b95ab";
+      ctx.fillText(l.text, l.x, l.y);
+    });
+    ctx.restore();
+  },
+};
+const hourShort = h => `${h % 12 === 0 ? 12 : h % 12}${h < 12 ? "a" : "p"}`;
+const hourRange = h => {
+  const f = x => `${x % 12 === 0 ? 12 : x % 12} ${x < 12 || x === 24 ? "AM" : "PM"}`;
+  return `${f(h)} – ${f(h + 1)}`;
+};
+
+async function loadWeek() {
+  try { week = await getJSON("/api/inverter/hourly?days=7"); } catch (e) { return; }
+  renderWeek();
+  renderCumulative();
+}
+
+// Running total at each hour boundary: the value at "3p" is everything
+// produced before 3 PM. A day needs every hour from first light onward —
+// after a missing hour the total is unknown, so the line stops there rather
+// than under-reading; days the inverter was only partly read are left out.
+function renderCumulative() {
+  const usable = week.days.filter(d => d.total_wh != null && !d.partial);
+  const skipped = week.days.filter(d => d.total_wh != null && d.partial).map(d => dayLabel(d.day));
+  const none = week.days.filter(d => d.total_wh == null).map(d => dayLabel(d.day));
+  document.getElementById("cumNote").textContent = [
+    skipped.length ? `${skipped.join(", ")} left out — the inverter was only read for part of the day, so a running total would start mid-day.` : "",
+    none.length ? `No inverter readings for ${none.join(", ")}.` : "",
+  ].filter(Boolean).join(" ");
+  if (cumChart) cumChart.destroy();
+  if (!usable.length) return;
+
+  const producing = usable.flatMap(d => Object.entries(d.hours).filter(([, wh]) => wh > 5).map(([h]) => +h));
+  const lo = Math.max(0, Math.min(...producing) - 1), hi = Math.min(23, Math.max(...producing) + 1);
+  const bounds = Array.from({ length: hi - lo + 2 }, (_, i) => lo + i);      // hour boundaries
+  const series = usable.map(d => {
+    let total = 0, broken = false;
+    return bounds.map((b, i) => {
+      if (i === 0) return 0;
+      const wh = d.hours[String(b - 1)];
+      if (wh == null) { broken = true; return null; }
+      if (broken) return null;
+      total += wh;
+      return total / 1000;
+    });
+  });
+  const kwh = wh => (wh / 1000).toFixed(2) + " kWh";
+  const boundLabel = b => `${b % 12 === 0 ? 12 : b % 12}${b < 12 || b === 24 ? "a" : "p"}`;
+  cumChart = new Chart(document.getElementById("cumChart"), {
+    type: "line",
+    plugins: [lineEndLabels],
+    data: {
+      labels: bounds.map(boundLabel),
+      datasets: usable.map((d, i) => ({
+        label: `${dayLabel(d.day)} · ${kwh(d.total_wh)}${d.is_today ? " so far" : ""}`,
+        data: series[i],
+        borderColor: dayShade(i, usable.length), backgroundColor: dayShade(i, usable.length),
+        borderWidth: d.is_today ? 3 : 2, pointRadius: d.is_today ? 3 : 0, pointHoverRadius: 5,
+        tension: 0.2, spanGaps: false,
+        endLabel: d.is_today ? "Today" : new Date(d.day + "T12:00:00Z").toLocaleDateString([], { weekday: "short", timeZone: "UTC" }),
+        isToday: d.is_today,
+      })),
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      layout: { padding: { right: 44 } },
+      interaction: { mode: "index", intersect: false },
+      scales: {
+        x: { ticks: { color: "#8b95ab" }, grid: { color: "#2a3450" } },
+        y: { beginAtZero: true, title: { display: true, text: "kWh produced so far", color: "#8b95ab" },
+             ticks: { color: "#8b95ab" }, grid: { color: "#2a3450" } },
+      },
+      plugins: {
+        legend: { labels: { color: "#e6ebf5", boxHeight: 3 } },
+        tooltip: { callbacks: {
+          title: items => items.length ? `By ${boundLabel(bounds[items[0].dataIndex]).replace("a", " AM").replace("p", " PM")}` : "",
+          label: item => ` ${item.dataset.label.split(" · ")[0]}: ${item.parsed.y == null ? "—" : item.parsed.y.toFixed(2) + " kWh"}`,
+        } },
+      },
+    },
+  });
+}
+
+function renderWeek() {
+  const days = week.days.filter(d => d.total_wh != null);
+  const missing = week.days.filter(d => d.total_wh == null).map(d => dayLabel(d.day));
+  document.getElementById("weekNote").textContent = missing.length
+    ? `No inverter readings for ${missing.join(", ")} — Modbus wasn't reading then, so those days are left out rather than drawn as zero.`
+    : "";
+  if (weekChart) weekChart.destroy();
+  if (!days.length) {
+    document.getElementById("weekDesc").textContent = "No inverter readings in the last 7 days yet.";
+    return;
+  }
+  const kwh = wh => (wh / 1000).toFixed(2) + " kWh";
+  const legendName = d => `${dayLabel(d.day)} · ${kwh(d.total_wh)}${d.is_today ? " so far" : ""}${d.partial ? " (partial)" : ""}`;
+
+  if (weekMode === "overlay") {
+    document.getElementById("weekDesc").innerHTML =
+      `Whole-system energy in each clock hour, one line per day, from the inverter's own counter.
+       Same shape on different days = consistent sun and shade; a dip on one day only = cloud.
+       Older days are dimmer; today is brightest and stops at the current hour. Hover an hour to compare days.`;
+    const used = days.flatMap(d => Object.entries(d.hours).filter(([, wh]) => wh > 5).map(([h]) => +h));
+    const lo = Math.max(0, Math.min(...used) - 1), hi = Math.min(23, Math.max(...used) + 1);
+    const hours = Array.from({ length: hi - lo + 1 }, (_, i) => lo + i);
+    weekChart = new Chart(document.getElementById("weekChart"), {
+      type: "line",
+      plugins: [lineEndLabels],
+      data: {
+        labels: hours.map(hourShort),
+        datasets: days.map((d, i) => ({
+          label: legendName(d),
+          data: hours.map(h => d.hours[String(h)] ?? null),
+          borderColor: dayShade(i, days.length), backgroundColor: dayShade(i, days.length),
+          borderWidth: d.is_today ? 3 : 2, pointRadius: d.is_today ? 3 : 0, pointHoverRadius: 5,
+          tension: 0.25, spanGaps: false,
+          endLabel: d.is_today ? "Today" : new Date(d.day + "T12:00:00Z").toLocaleDateString([], { weekday: "short", timeZone: "UTC" }),
+          isToday: d.is_today,
+        })),
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        layout: { padding: { right: 44 } },
+        interaction: { mode: "index", intersect: false },
+        scales: {
+          x: { ticks: { color: "#8b95ab" }, grid: { color: "#2a3450" } },
+          y: { beginAtZero: true, title: { display: true, text: "Wh per hour", color: "#8b95ab" },
+               ticks: { color: "#8b95ab" }, grid: { color: "#2a3450" } },
+        },
+        plugins: {
+          legend: { labels: { color: "#e6ebf5", boxHeight: 3 } },
+          tooltip: { callbacks: {
+            title: items => items.length ? hourRange(hours[items[0].dataIndex]) : "",
+            label: item => ` ${item.dataset.label.split(" · ")[0]}: ${item.parsed.y == null ? "—" : Math.round(item.parsed.y) + " Wh"}`,
+          } },
+        },
+      },
+    });
+  } else {
+    document.getElementById("weekDesc").innerHTML =
+      `The same 7 days as one continuous line, hour by hour, so you can see day-to-day changes in sequence.
+       Nights read zero; gaps are hours with no inverter readings.`;
+    const pts = days.flatMap(d => Array.from({ length: 24 }, (_, h) => ({ d, h, wh: d.hours[String(h)] ?? null })));
+    weekChart = new Chart(document.getElementById("weekChart"), {
+      type: "line",
+      data: {
+        labels: pts.map(p => `${p.d.day}|${p.h}`),
+        datasets: [{
+          label: "Energy per hour (Wh)", data: pts.map(p => p.wh),
+          borderColor: "#4f8cff", backgroundColor: "rgba(79,140,255,0.12)", fill: true,
+          borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, tension: 0.2, spanGaps: false,
+        }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        interaction: { mode: "index", intersect: false },
+        scales: {
+          x: { ticks: { color: "#8b95ab", autoSkip: false, maxRotation: 0,
+                        callback: (v, i) => pts[i].h === 12 ? dayLabel(pts[i].d.day) : "" },
+               grid: { color: ctx => pts[ctx.index] && pts[ctx.index].h === 0 ? "#3a4870" : "transparent" } },
+          y: { beginAtZero: true, title: { display: true, text: "Wh per hour", color: "#8b95ab" },
+               ticks: { color: "#8b95ab" }, grid: { color: "#2a3450" } },
+        },
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: {
+            title: items => items.length ? `${dayLabel(pts[items[0].dataIndex].d.day)}, ${hourRange(pts[items[0].dataIndex].h)}` : "",
+            label: item => ` ${item.parsed.y == null ? "no reading" : Math.round(item.parsed.y) + " Wh"}`,
+          } },
+        },
+      },
+    });
+  }
+}
+
+document.querySelectorAll("#weekMode .tab").forEach(b => b.addEventListener("click", () => {
+  weekMode = b.dataset.mode;
+  document.querySelectorAll("#weekMode .tab").forEach(x => x.classList.toggle("active", x === b));
+  renderWeek();
+}));
+loadWeek();
+setInterval(loadWeek, 5 * 60 * 1000);   // today's line grows through the day
 </script>
 </body>
 </html>

@@ -27,6 +27,7 @@ from fastapi.staticfiles import StaticFiles
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src import analysis, daily, inverter_stats, modbus_client, panel_daily  # noqa: E402
+from src import groups as panel_groups  # noqa: E402
 from src.config import Config  # noqa: E402
 
 cfg = Config.load()
@@ -57,7 +58,53 @@ class AbsoluteFormMiddleware:
 
 app.add_middleware(AbsoluteFormMiddleware)
 
+
+class RevalidateStaticMiddleware:
+    """Tell browsers to check for a newer page/script/style on every load.
+
+    Without a Cache-Control header browsers may reuse a cached copy for a
+    while, so after an update people kept seeing the old dashboard. With
+    "no-cache" an unchanged file still costs only a 304 (ETag), so nothing
+    is re-downloaded unless it actually changed. API responses are dynamic
+    and unaffected."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        path = scope.get("path", "") if scope["type"] == "http" else ""
+        static = not path.startswith("/api/") and (
+            path == "/" or path.endswith((".html", ".js", ".css")))
+
+        async def send_wrapper(message):
+            if static and message["type"] == "http.response.start":
+                headers = [(k, v) for k, v in message.get("headers", []) if k.lower() != b"cache-control"]
+                headers.append((b"cache-control", b"no-cache"))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+
+
+app.add_middleware(RevalidateStaticMiddleware)
+
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+
+def _grouping() -> panel_groups.Grouping:
+    """Which panels are compared with each other (PANEL_GROUPS; whole array
+    by default). Re-read per request is cheap and keeps it simple."""
+    return panel_groups.parse(cfg.panel_groups)
+
+
+def _optimizer_list(conn) -> list[dict]:
+    """Active optimizers with the group each is compared within."""
+    rows = [dict(r) for r in conn.execute("SELECT serial, label, panel_model FROM optimizers")
+            if r["serial"] not in cfg.decommissioned]
+    groups = panel_groups.assign(rows, _grouping())
+    for r in rows:
+        r["group"] = groups.get(r["serial"]) or None
+    return rows
 
 
 def _connect() -> sqlite3.Connection:
@@ -140,7 +187,20 @@ def optimizers():
             ORDER BY o.serial
             """
         ).fetchall()
-    return [dict(r) for r in rows]
+        # Today's energy per panel, same figures as the panel history page.
+        today = datetime.now(ZoneInfo(cfg.site_timezone)).date().isoformat()
+        figures = _panel_days(conn, today).get(today, {})
+    out = []
+    for r in rows:
+        d = dict(r)
+        f = figures.get(d["serial"], {})
+        d["today_estimated_wh"] = f.get("estimated_wh")
+        d["today_measured_wh"] = f.get("measured_wh")
+        d["today_coverage_pct"] = f.get("coverage_pct")
+        # Sort/display key: the estimate when there is one, else measured.
+        d["today_wh"] = f.get("estimated_wh") if f.get("estimated_wh") is not None else f.get("measured_wh")
+        out.append(d)
+    return out
 
 
 @app.get("/api/optimizers/{serial}/readings")
@@ -314,6 +374,7 @@ def health(hours: int = 72, hour_of_day: int | None = None):
     return analysis.score_optimizers(
         cfg.db_path, hours=hours, hour_of_day=hour_of_day,
         cfg_timezone=cfg.site_timezone, decommissioned=cfg.decommissioned,
+        grouping=_grouping(),
     )
 
 
@@ -326,7 +387,7 @@ def hourly(hours: int = 168):
         raise HTTPException(503, "Database not created yet — is the poller running?")
     return analysis.hourly_profile(
         cfg.db_path, hours=hours, cfg_timezone=cfg.site_timezone,
-        decommissioned=cfg.decommissioned,
+        decommissioned=cfg.decommissioned, grouping=_grouping(),
     )
 
 
@@ -523,7 +584,7 @@ def _panel_days(conn, since: str, serial: str | None = None) -> dict[str, dict[s
         pass
     inv_today = daily.compute_day(conn, today, tz, is_today=True) or {}
     energy = inv_today.get("energy_wh") if not inv_today.get("partial") else None
-    live = panel_daily.compute_day(conn, today, tz, cfg.decommissioned, energy)
+    live = panel_daily.compute_day(conn, today, tz, cfg.decommissioned, energy, _grouping())
     if serial:
         live = {k: v for k, v in live.items() if k == serial}
     if live:
@@ -555,21 +616,142 @@ def panels_daily(days: int = 30):
     since = (datetime.now(tz).date() - timedelta(days=max(1, days) - 1)).isoformat()
     with _connect() as conn:
         per_day = _panel_days(conn, since)
-        opts = [dict(r) for r in conn.execute("SELECT serial, label, panel_model FROM optimizers")
-                if r["serial"] not in cfg.decommissioned]
+        opts = _optimizer_list(conn)
         try:
             inv = {r["day"]: dict(r) for r in conn.execute(
                 "SELECT day, energy_wh, partial, se_coverage_pct FROM inverter_daily WHERE day >= ?", (since,))}
+            # Collection almost always starts part-way through a day, so the
+            # first recorded day is a fragment, whatever its coverage says.
+            first_day = conn.execute("SELECT MIN(day) FROM panel_daily").fetchone()[0]
         except sqlite3.OperationalError:
-            inv = {}
+            inv, first_day = {}, None
     return {
         "timezone": cfg.site_timezone,
         "retention_days": cfg.optimizer_retention_days,
+        "grouping": _grouping().describe(),
+        "first_recorded_day": first_day,
         "optimizers": opts,
         "days": sorted(per_day),
         "values": per_day,
         "inverter": inv,
     }
+
+
+def _hourly_rows(conn, day, tz) -> dict[int, dict[str, dict]]:
+    """{hour: {serial: figures}} — stored rows, or computed live for today
+    (and for any day the roll-up hasn't reached yet)."""
+    today = datetime.now(tz).date()
+    stored: dict[int, dict[str, dict]] = {}
+    if day != today:
+        try:
+            for r in conn.execute("SELECT * FROM panel_hourly WHERE day = ?", (day.isoformat(),)):
+                if r["serial"] not in cfg.decommissioned:
+                    stored.setdefault(r["hour"], {})[r["serial"]] = dict(r)
+        except sqlite3.OperationalError:
+            pass
+    return stored or panel_daily.compute_hours(conn, day, tz, cfg.decommissioned, _grouping())
+
+
+@app.get("/api/panels/hourly")
+def panels_hourly(date: str | None = None):
+    """Every panel's energy for each hour of one site-local day, with ranks
+    (whole array and within group) for hours where every panel's data
+    arrived, and the day's wins / top-3 / average rank."""
+    tz = ZoneInfo(cfg.site_timezone)
+    try:
+        day = datetime.strptime(date, "%Y-%m-%d").date() if date else datetime.now(tz).date()
+    except ValueError:
+        raise HTTPException(422, "date must be YYYY-MM-DD")
+    start, end = inverter_stats.day_bounds(day, tz)
+    with _connect() as conn:
+        hours = _hourly_rows(conn, day, tz)
+        try:
+            inverter = panel_daily._inverter_hour_energy(conn, start, end, tz)
+        except sqlite3.OperationalError:
+            inverter = {}
+        opts = _optimizer_list(conn)
+    flat = [{"serial": s, **f} for per in hours.values() for s, f in per.items()]
+    return {
+        "date": day.isoformat(),
+        "timezone": cfg.site_timezone,
+        "is_today": day == datetime.now(tz).date(),
+        "grouping": _grouping().describe(),
+        "optimizers": opts,
+        "hours": [
+            {
+                "hour": h,
+                "scored": any(f.get("scored") for f in per.values()),
+                "inverter_wh": inverter.get(h),
+                "measured_wh": round(sum(f.get("measured_wh") or 0 for f in per.values()), 1),
+                "missing_panels": sum(
+                    1 for f in per.values()
+                    if (f.get("coverage_pct") or 0) < panel_daily.SCORED_HOUR_COVERAGE),
+            }
+            for h, per in sorted(hours.items())
+        ],
+        "values": {str(h): per for h, per in hours.items()},
+        "day_board": {"all": panel_daily.leaderboard(flat, "all"),
+                      "group": panel_daily.leaderboard(flat, "group")},
+    }
+
+
+@app.get("/api/panels/leaderboard")
+def panels_leaderboard(days: int = 30):
+    """Wins, top-3 finishes and average rank per panel over a range of days,
+    both whole-array and within-group."""
+    tz = ZoneInfo(cfg.site_timezone)
+    today = datetime.now(tz).date()
+    since = (today - timedelta(days=max(1, days) - 1)).isoformat()
+    with _connect() as conn:
+        try:
+            rows = [dict(r) for r in conn.execute(
+                "SELECT * FROM panel_hourly WHERE day >= ? AND day < ?", (since, today.isoformat()))
+                if r["serial"] not in cfg.decommissioned]
+        except sqlite3.OperationalError:
+            rows = []
+        live = panel_daily.compute_hours(conn, today, tz, cfg.decommissioned, _grouping())
+        opts = _optimizer_list(conn)
+    rows += [{"day": today.isoformat(), "hour": h, "serial": s, **f}
+             for h, per in live.items() for s, f in per.items()]
+    return {
+        "days": days,
+        "grouping": _grouping().describe(),
+        "optimizers": opts,
+        "scored_hours": len({(r["day"], r["hour"]) for r in rows if r.get("scored")}),
+        "all": panel_daily.leaderboard(rows, "all"),
+        "group": panel_daily.leaderboard(rows, "group"),
+    }
+
+
+@app.get("/api/inverter/hourly")
+def inverter_hourly(days: int = 7):
+    """Whole-system energy per clock hour for the last N site-local days,
+    from the rise of the inverter's lifetime counter (same calculation as
+    the hourly ranking page). Hours without inverter readings around their
+    boundaries are omitted, not guessed."""
+    tz = ZoneInfo(cfg.site_timezone)
+    today = datetime.now(tz).date()
+    days = max(1, min(days, 31))
+    out = []
+    with _connect() as conn:
+        try:
+            partial = {r["day"]: bool(r["partial"]) for r in conn.execute(
+                "SELECT day, partial FROM inverter_daily WHERE day >= ?",
+                ((today - timedelta(days=days - 1)).isoformat(),))}
+        except sqlite3.OperationalError:
+            partial = {}
+        for i in range(days - 1, -1, -1):
+            d = today - timedelta(days=i)
+            start, end = inverter_stats.day_bounds(d, tz)
+            hours = panel_daily._inverter_hour_energy(conn, start, end, tz)
+            out.append({
+                "day": d.isoformat(),
+                "is_today": d == today,
+                "partial": partial.get(d.isoformat(), False),
+                "hours": {str(h): wh for h, wh in sorted(hours.items())},
+                "total_wh": round(sum(hours.values()), 1) if hours else None,
+            })
+    return {"timezone": cfg.site_timezone, "days": out}
 
 
 @app.get("/api/inverter/day")

@@ -23,6 +23,7 @@ from types import FrameType
 import requests
 
 from . import daily, db, modbus_client
+from . import groups as panel_groups
 from .client import RateLimited, SolarEdgeClient
 from .config import Config
 from .discover import Optimizer, discover_optimizers
@@ -199,9 +200,12 @@ def run() -> None:
         if time.monotonic() - last_maintenance > MAINTENANCE_INTERVAL_SECONDS:
             last_maintenance = time.monotonic()
             try:
+                grouping = panel_groups.parse(cfg.panel_groups)
+                if grouping.error:
+                    logger.warning(grouping.error)
                 daily.run_maintenance(
                     cfg.db_path, cfg.site_timezone, cfg.inverter_retention_days,
-                    cfg.optimizer_retention_days, cfg.decommissioned)
+                    cfg.optimizer_retention_days, cfg.decommissioned, grouping)
             except Exception:
                 logger.exception("Daily history update failed")
 

@@ -55,6 +55,8 @@ from pathlib import Path
 from statistics import median
 from zoneinfo import ZoneInfo
 
+from . import groups as panel_groups
+
 # Readings are compared within fixed windows of MEASUREMENT time. 15 min
 # gives each optimizer ~3 reports per window at its 3-6 min cadence.
 WINDOW_SECONDS = 900
@@ -92,12 +94,11 @@ NEAR_ZERO_A = 0.2
 # awarded at 90% of the peer median rather than demanding 100%.
 PAR_RATIO = 0.90
 
-# Panels are compared within their own model group. This site's two groups
-# differ by 2.5x under the same sun, which against a single array-wide
-# median read as ten failing panels on one side and ten stellar ones on the
-# other. A group needs enough reporting members for its median to mean
-# anything; below this it falls back to the array-wide median, which is
-# still better than comparing against two or three peers.
+# Panels are compared with the median of their group — the whole array by
+# default, or the groups set in PANEL_GROUPS (see src/groups.py). A group
+# needs enough reporting members for its median to mean anything; below this
+# it falls back to the array-wide median, which is still better than
+# comparing against two or three peers.
 MIN_GROUP_FOR_OWN_MEDIAN = 5
 
 
@@ -279,10 +280,12 @@ def score_optimizers(
     hour_of_day: int | None = None,
     cfg_timezone: str = "UTC",
     decommissioned: frozenset = frozenset(),
+    grouping: "panel_groups.Grouping | None" = None,
 ) -> dict:
     optimizers, all_rows, fresh = _load(db_path, hours, decommissioned)
     tz = ZoneInfo(cfg_timezone)
-    groups = {o["serial"]: o["panel_model"] for o in optimizers}
+    grouping = grouping or panel_groups.WHOLE_ARRAY
+    groups = panel_groups.assign(optimizers, grouping)
 
     windows = _build_windows(fresh, tz)
     active = len({s for w in windows.values() for s in w["panel_power"]})
@@ -374,6 +377,7 @@ def score_optimizers(
             "serial": serial,
             "label": opt["label"],
             "panel_model": opt["panel_model"],
+            "group": groups.get(serial) or None,
             "fresh_count": fresh_n,
             "stale_count": stale,
             "missing_count": missing,
@@ -412,6 +416,7 @@ def score_optimizers(
         "hour_of_day": hour_of_day,
         "excluded_decommissioned": sorted(decommissioned),
         "timezone": cfg_timezone,
+        "grouping": grouping.describe(),
         "optimizers": results,
     }
 
@@ -421,6 +426,7 @@ def hourly_profile(
     hours: int = 168,
     cfg_timezone: str = "UTC",
     decommissioned: frozenset = frozenset(),
+    grouping: "panel_groups.Grouping | None" = None,
 ) -> dict:
     """Per-optimizer output-vs-peers broken down by hour of day — the thing
     that separates shading from a fault.
@@ -434,7 +440,8 @@ def hourly_profile(
     optimizers, _, fresh = _load(db_path, hours, decommissioned)
     tz = ZoneInfo(cfg_timezone)
     labels = {o["serial"]: o["label"] for o in optimizers}
-    groups = {o["serial"]: o["panel_model"] for o in optimizers}
+    grouping = grouping or panel_groups.WHOLE_ARRAY
+    groups = panel_groups.assign(optimizers, grouping)
 
     windows = _build_windows(fresh, tz)
     active = len({s for w in windows.values() for s in w["panel_power"]})
@@ -487,6 +494,7 @@ def hourly_profile(
 
     return {
         "timezone": cfg_timezone,
+        "grouping": grouping.describe(),
         "window_minutes": WINDOW_SECONDS // 60,
         "hours_covered": sorted(hours_seen),
         "scored_windows": scored_total,

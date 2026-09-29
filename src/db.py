@@ -157,6 +157,33 @@ CREATE TABLE IF NOT EXISTS panel_daily (
     PRIMARY KEY (day, serial)
 );
 CREATE INDEX IF NOT EXISTS idx_panel_daily_serial ON panel_daily(serial, day);
+
+-- One row per optimizer per site-local clock hour, from
+-- src/panel_daily.py:compute_hours. Kept indefinitely, like panel_daily.
+-- Ranks exist only for "scored" hours — every active panel's data present —
+-- because an hour with a panel missing can't fairly name a winner.
+CREATE TABLE IF NOT EXISTS panel_hourly (
+    day            TEXT NOT NULL,     -- YYYY-MM-DD, site-local
+    hour           INTEGER NOT NULL,  -- 0-23, site-local
+    serial         TEXT NOT NULL,
+    measured_wh    REAL,              -- own readings integrated within the hour
+    estimated_wh   REAL,              -- inverter's hour energy split by measured share
+    avg_power_w    REAL,              -- mean of the hour's readings
+    coverage_pct   REAL,              -- producing 15-min windows with this panel's data
+    scored         INTEGER NOT NULL DEFAULT 0,
+    rank_all       INTEGER,           -- 1 = most energy that hour, whole array
+    rank_group     INTEGER,           -- 1 = most energy within its panel-model group
+    finalized      INTEGER NOT NULL DEFAULT 0,
+    updated_at     TEXT NOT NULL,
+    PRIMARY KEY (day, hour, serial)
+);
+
+-- Small key/value store, e.g. which panel grouping the stored per-panel
+-- history was computed with.
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 
 
@@ -333,6 +360,55 @@ def upsert_panel_daily(db_path: Path, day: str, figures: dict[str, dict], finali
              for serial, f in figures.items()],
         )
         conn.commit()
+
+
+PANEL_HOURLY_COLUMNS = (
+    "measured_wh", "estimated_wh", "avg_power_w", "coverage_pct",
+    "scored", "rank_all", "rank_group",
+)
+
+
+def upsert_panel_hourly(db_path: Path, day: str, hours: dict[int, dict[str, dict]],
+                        finalized: int) -> None:
+    cols = ", ".join(PANEL_HOURLY_COLUMNS)
+    marks = ", ".join("?" for _ in PANEL_HOURLY_COLUMNS)
+    updates = ", ".join(f"{c}=excluded.{c}" for c in PANEL_HOURLY_COLUMNS)
+    now = _now()
+    with connect(db_path) as conn:
+        conn.executemany(
+            f"""
+            INSERT INTO panel_hourly (day, hour, serial, {cols}, finalized, updated_at)
+            VALUES (?, ?, ?, {marks}, ?, ?)
+            ON CONFLICT(day, hour, serial) DO UPDATE SET {updates},
+                finalized=excluded.finalized, updated_at=excluded.updated_at
+            """,
+            [(day, hour, serial, *(f.get(c) for c in PANEL_HOURLY_COLUMNS), finalized, now)
+             for hour, per in hours.items() for serial, f in per.items()],
+        )
+        conn.commit()
+
+
+def get_meta(db_path: Path, key: str) -> str | None:
+    with connect(db_path) as conn:
+        row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def set_meta(db_path: Path, key: str, value: str) -> None:
+    with connect(db_path) as conn:
+        conn.execute("INSERT INTO meta (key, value) VALUES (?, ?) "
+                     "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
+        conn.commit()
+
+
+def unfinalize_panel_history(db_path: Path) -> int:
+    """Mark per-panel daily/hourly rows for recomputation (the roll-up only
+    recomputes days whose raw readings still exist)."""
+    with connect(db_path) as conn:
+        n = conn.execute("UPDATE panel_daily SET finalized = 0").rowcount
+        conn.execute("UPDATE panel_hourly SET finalized = 0")
+        conn.commit()
+    return n
 
 
 def prune_optimizer_raw(db_path: Path, keep_days: int) -> int:

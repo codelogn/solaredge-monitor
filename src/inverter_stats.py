@@ -59,6 +59,30 @@ def drop_stale(rows: list[dict], floor: int = 0) -> list[dict]:
     return kept
 
 
+def drop_lagging(rows: list[dict], min_share: float = 0.25) -> list[dict]:
+    """Remove readings whose lifetime counter barely moved while the inverter
+    was producing — a stuck snapshot that crept forward rather than going
+    backwards, so drop_stale() can't see it. Seen 2026-09-26: +2 Wh over
+    8 minutes at ~1.1 kW, after a run of failed reads; used at an hour
+    boundary it moved ~140 Wh from one hour into the next.
+
+    A reading is dropped when the counter rose by less than min_share of the
+    energy the DC power on both sides implies (with 20% allowance for
+    conversion losses). Needs dc_power on each row."""
+    kept: list[dict] = []
+    for r in rows:
+        if kept:
+            a = kept[-1]
+            dt = (parse_ts(r["fetched_at"]) - parse_ts(a["fetched_at"])).total_seconds()
+            low = min(a.get("dc_power") or 0, r.get("dc_power") or 0)
+            expected = low * dt / 3600 * 0.8
+            rise = (r.get("lifetime_wh") or 0) - (a.get("lifetime_wh") or 0)
+            if expected >= 20 and rise < min_share * expected:
+                continue
+        kept.append(r)
+    return kept
+
+
 def summarize(rows: list[dict], baseline: dict | None = None) -> dict:
     """Figures for one day.
 

@@ -40,6 +40,8 @@
   table.grid td.cell { cursor: pointer; }
   table.grid td.low-cov { outline: 1px dashed rgba(245,166,35,0.7); outline-offset: -2px; }
   table.grid td.sum { font-weight: 600; background: var(--panel-2); }
+  table.grid tr.sys-row td { border-bottom: 2px solid var(--border); }
+  table.grid tr.sys-row td.rowhead { color: var(--text); }
   table.grid tr:hover td.rowhead { color: var(--accent); }
   .day-head { writing-mode: vertical-rl; transform: rotate(180deg); height: 58px; }
   .legend-bar { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); margin-top: 10px; flex-wrap: wrap; }
@@ -47,9 +49,9 @@
 </style>
 </head>
 <body>
-  <a href="/">&larr; Back to dashboard</a>
   <h1>Panel history</h1>
   <div class="subtitle">Every panel, every day — from SolarEdge's per-panel data, summarised on this machine.
+    <a href="hourly.html">Hourly ranking →</a>
     Click a panel for its detail page.</div>
   <div id="srcLegend"></div>
 
@@ -76,8 +78,8 @@
 const METRICS = {
   vs_peers_pct: {
     title: "Output vs peers (%)", src: ["calc", "se"], acc: 4,
-    desc: `Each panel's average power as a % of its panel-model group's median, per day (same method as the
-      dashboard verdict). 100% = like its group. A panel that drifts down over weeks is the thing to catch
+    desc: `Each panel's average power as a % of its peers' median, per day (same method as the dashboard
+      verdict; peers = the whole array unless PANEL_GROUPS sets groups). 100% = like its peers. A panel that drifts down over weeks is the thing to catch
       here; a single low day is usually weather or shade.`,
     fmt: v => Math.round(v) + "", scale: v => (v - 50) / 70, summary: "median",
   },
@@ -106,7 +108,40 @@ const METRICS = {
     fmt: v => Math.round(v) + "", scale: v => (v - 50) / 50, summary: "median",
   },
 };
+METRICS.day_change = {
+  title: "Change vs previous day (%)", src: ["calc", "se"], acc: 14, special: "change",
+  desc: `Each panel's energy compared with its own previous day: <b style="color:#4ade80">▲ green</b> = produced
+    more, <b style="color:#f87171">▼ red</b> = produced less, ≈ = within ±2%. Day-to-day changes are mostly
+    <b>weather</b> — on a cloudy day every panel goes red together — so compare each panel with the
+    <b>Whole system</b> row (the inverter's own daily total): a panel that's red while the system is green is
+    the one to look at. Uses estimated energy when both days have it, otherwise measured; dashed cells had
+    incomplete data on one of the two days, and days with too little data aren't compared at all (·).`,
+  fmt: v => (v > 0 ? "+" : "") + v.toFixed(0) + "%", summary: "updown",
+};
 const LOW_COVERAGE = 90;
+const FLAT_PCT = 2;       // |change| below this counts as no change
+// Below this coverage on either day a "change" compares fragments of days
+// (e.g. +700% after a day collection started mid-afternoon), so none is shown.
+const MIN_COMPARE_COVERAGE = 75;
+
+// Diverging green/red by size of change, grey near zero. Arrow + sign carry
+// the direction too, so it never relies on colour alone.
+function changeColor(pct) {
+  if (Math.abs(pct) < FLAT_PCT) return "rgba(139,149,171,0.28)";
+  const a = 0.3 + 0.6 * Math.min(1, Math.abs(pct) / 30);
+  return pct > 0 ? `rgba(34,160,90,${a})` : `rgba(210,60,60,${a})`;
+}
+const arrow = pct => Math.abs(pct) < FLAT_PCT ? "≈" : (pct > 0 ? "▲" : "▼");
+
+// Energy for a comparison of two days: estimated on both if available (it
+// adds up to the inverter), else measured on both — never mixed.
+function pairEnergy(a, b) {
+  if (a && b && a.estimated_wh != null && b.estimated_wh != null)
+    return { cur: a.estimated_wh, prev: b.estimated_wh, basis: "estimated" };
+  if (a && b && a.measured_wh != null && b.measured_wh != null)
+    return { cur: a.measured_wh, prev: b.measured_wh, basis: "measured" };
+  return null;
+}
 
 const params = new URLSearchParams(location.search);
 let metric = METRICS[params.get("metric")] ? params.get("metric") : "vs_peers_pct";
@@ -117,6 +152,11 @@ async function getJSON(url) {
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
+function isoDaysAgo(n) {
+  const t = new Date(); t.setDate(t.getDate() - n);
+  return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
+}
+function prevDay(d) { const i = data.allDays.indexOf(d); return i > 0 ? data.allDays[i - 1] : null; }
 function pos(label) { return (label || "").replace("Optimizer ", "").split(" ")[0]; }
 function posKey(label) { return pos(label).split(".").map(n => n.padStart(4, "0")).join("."); }
 function dayShort(day) {
@@ -141,8 +181,10 @@ function renderTabs() {
 }
 
 async function load() {
-  const days = document.getElementById("rangeSelect").value;
-  data = await getJSON(`/api/panels/daily?days=${days}`);
+  const days = Number(document.getElementById("rangeSelect").value);
+  data = await getJSON(`/api/panels/daily?days=${days + 1}`);    // +1: the previous day of the first column
+  data.allDays = data.days;
+  data.days = data.days.filter(d => d >= isoDaysAgo(days - 1));
   document.getElementById("retentionNote").textContent =
     `Daily per-panel summaries are kept indefinitely; the raw readings behind them are kept ` +
     (data.retention_days ? `${data.retention_days} days.` : `indefinitely.`);
@@ -151,6 +193,7 @@ async function load() {
 
 function renderGrid() {
   const m = METRICS[metric];
+  if (m.special === "change") return renderChange(m);
   const [kind, from] = m.src;
   document.getElementById("metricTitle").innerHTML = `${m.title}${acc(m.acc)} ${src(kind, from)}`;
   document.getElementById("metricDesc").innerHTML = m.desc;
@@ -194,7 +237,7 @@ function renderGrid() {
       else { const s = [...vals].sort((a, b) => a - b); summary = m.fmt(s[Math.floor(s.length / 2)]); }
     }
     return `<tr><td class="rowhead"><a href="optimizer.html?serial=${encodeURIComponent(o.serial)}">${pos(o.label)}</a></td>
-      <td class="muted">${o.panel_model ?? ""}</td>${cells}<td class="sum">${summary}</td></tr>`;
+      <td class="muted">${o.group ?? "—"}</td>${cells}<td class="sum">${summary}</td></tr>`;
   }).join("");
 
   document.getElementById("grid").innerHTML = `<thead>${head}</thead><tbody>${rows}</tbody>`;
@@ -208,6 +251,76 @@ function renderGrid() {
       coverage under ${LOW_COVERAGE}%${acc(14)}</span>
     <span style="margin-left:14px">⚠ day the inverter was only partly read${acc(13)}</span>
     <span style="margin-left:14px">hover a cell for details</span>`;
+}
+
+function renderChange(m) {
+  const [kind, from] = m.src;
+  document.getElementById("metricTitle").innerHTML = `${m.title}${acc(m.acc)} ${src(kind, from)}`;
+  document.getElementById("metricDesc").innerHTML = m.desc;
+  const days = data.days;
+  const opts = [...data.optimizers].sort((a, b) => posKey(a.label).localeCompare(posKey(b.label)));
+  const cell = (pct, tip, dashed, serial) => pct == null ? `<td class="muted">·</td>` :
+    `<td class="cell ${dashed ? "low-cov" : ""}" style="background:${changeColor(pct)}; color:#fff" title="${tip}"
+      ${serial ? `data-serial="${serial}"` : ""}>${arrow(pct)} ${m.fmt(pct)}</td>`;
+  const updown = list => {
+    const up = list.filter(p => p >= FLAT_PCT).length, down = list.filter(p => p <= -FLAT_PCT).length;
+    return list.length ? `<span style="color:#4ade80">${up}▲</span> <span style="color:#f87171">${down}▼</span>` : "—";
+  };
+
+  // Reference row: the whole system, from the inverter's own daily energy.
+  const sys = [];
+  const sysCells = days.map(d => {
+    const p = prevDay(d), a = data.inverter[d], b = p && data.inverter[p];
+    if (!a || !b || !a.energy_wh || !b.energy_wh) return `<td class="muted">·</td>`;
+    if (a.partial || b.partial)
+      return `<td class="muted" title="Not compared — the inverter was only read for part of ${a.partial ? d : p}">·</td>`;
+    const pct = 100 * (a.energy_wh - b.energy_wh) / b.energy_wh;
+    sys.push(pct);
+    const tip = `Whole system · ${p} → ${d}: ${(b.energy_wh / 1000).toFixed(2)} → ${(a.energy_wh / 1000).toFixed(2)} kWh` +
+      (a.partial || b.partial ? " · inverter only partly read on one of the days" : "");
+    return cell(pct, tip, a.partial || b.partial, null);
+  }).join("");
+
+  const rows = opts.map(o => {
+    const vals = [];
+    const cells = days.map(d => {
+      const p = prevDay(d);
+      const a = (data.values[d] || {})[o.serial], b = p && (data.values[p] || {})[o.serial];
+      const e = pairEnergy(a, b);
+      if (!e || !e.prev) return `<td class="muted">·</td>`;
+      if (p === data.first_recorded_day)
+        return `<td class="muted" title="Not compared — ${p} was the first day of collection, which started part-way through the day">·</td>`;
+      const thin = [[a, d], [b, p]].find(([f]) => f.coverage_pct != null && f.coverage_pct < MIN_COMPARE_COVERAGE);
+      if (thin)
+        return `<td class="muted" title="Not compared — only ${Math.round(thin[0].coverage_pct)}% of ${thin[1]}'s per-panel data arrived">·</td>`;
+      const pct = 100 * (e.cur - e.prev) / e.prev;
+      vals.push(pct);
+      const incomplete = [a, b].some(f => f.coverage_pct != null && f.coverage_pct < LOW_COVERAGE);
+      const tip = `${pos(o.label)} · ${p} → ${d}: ${Math.round(e.prev)} → ${Math.round(e.cur)} Wh (${m.fmt(pct)}, ${e.basis})` +
+        ` · coverage ${b.coverage_pct ?? "—"}% → ${a.coverage_pct ?? "—"}%` + (a.finalized ? "" : " · may still change");
+      return cell(pct, tip, incomplete, o.serial);
+    }).join("");
+    return `<tr><td class="rowhead"><a href="optimizer.html?serial=${encodeURIComponent(o.serial)}">${pos(o.label)}</a></td>
+      <td class="muted">${o.group ?? "—"}</td>${cells}<td class="sum">${updown(vals)}</td></tr>`;
+  }).join("");
+
+  const head = `<tr><th class="rowhead">Panel</th><th>Group</th>
+    ${days.map(d => `<th title="${prevDay(d) ?? "no earlier day"} → ${d}"><div class="day-head">${dayShort(d)}</div></th>`).join("")}
+    <th title="Days up / days down">Up / down</th></tr>`;
+  document.getElementById("grid").innerHTML = `<thead>${head}</thead><tbody>
+    <tr class="sys-row"><td class="rowhead"><b>Whole system</b></td><td class="muted">inverter</td>${sysCells}<td class="sum">${updown(sys)}</td></tr>
+    ${rows}</tbody>`;
+  document.querySelectorAll("#grid td.cell[data-serial]").forEach(td => td.addEventListener("click", () =>
+    location.href = `optimizer.html?serial=${encodeURIComponent(td.dataset.serial)}`));
+  document.getElementById("legendBar").innerHTML = `
+    <span class="swatch" style="background:${changeColor(20)}"></span> ▲ more than the previous day
+    <span class="swatch" style="background:${changeColor(-20)}; margin-left:10px"></span> ▼ less
+    <span class="swatch" style="background:${changeColor(0)}; margin-left:10px"></span> ≈ within ±${FLAT_PCT}%
+    <span style="margin-left:14px">stronger colour = bigger change</span>
+    <span style="margin-left:14px"><span class="swatch" style="outline:1px dashed rgba(245,166,35,0.9);outline-offset:-2px"></span>
+      incomplete data on one of the days${acc(14)}</span>
+    <span style="margin-left:14px">· = not compared (under ${MIN_COMPARE_COVERAGE}% of a day's data, a partial inverter day, or the first day of collection)</span>
+    <span style="margin-left:14px">hover a cell for the two days' energy</span>`;
 }
 
 document.getElementById("srcLegend").innerHTML = srcLegend();

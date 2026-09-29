@@ -11,7 +11,8 @@ blame hardware for a network outage.
 
 ### `optimizers`
 `serial` (PK), `label`, `panel_model`, `first_seen`, `last_seen` — discovered
-equipment. `panel_model` drives group-relative comparison (see
+equipment. `panel_model` is SolarEdge's free-text module label; it is used
+for grouping only with `PANEL_GROUPS=solaredge` (see
 [04-analysis-method.md](04-analysis-method.md)); groups on one site can
 differ several-fold in output.
 
@@ -112,6 +113,26 @@ it by construction.
 Raw `readings` older than `OPTIMIZER_RETENTION_DAYS` (default 365) are
 deleted after the roll-up; `panel_daily` is never pruned. `poll_cycles` is
 kept (720 small rows a day).
+
+### `panel_hourly` — one row per optimizer per site-local clock hour, kept indefinitely
+
+Written by the same roll-up as `panel_daily` (`src/panel_daily.py:compute_hours`),
+same finalisation. Primary key `(day, hour, serial)`.
+
+| Column | Meaning |
+|---|---|
+| `measured_wh` | The optimizer's readings integrated within the hour; a reading interval that straddles an hour boundary is split in proportion. Gaps over 15 min skipped |
+| `estimated_wh` | The inverter's energy for the hour (lifetime counter interpolated at each hour boundary; NULL if the boundary readings are over 20 min apart) split by measured share. Counter readings that went backwards (`drop_stale`) or barely moved while producing (`drop_lagging` — a stuck snapshot, seen after runs of failed reads) are discarded first |
+| `avg_power_w` | Mean of the hour's readings |
+| `coverage_pct` | Share of the hour's producing 15-min windows with this optimizer's readings |
+| `scored` | 1 only if the array was producing (median ≥ 20 W) and **every** panel that reported that day has data in all of the hour's producing windows — a panel missing a window would lose unfairly |
+| `rank_all`, `rank_group` | Competition ranks (ties share, 1, 1, 3) by `measured_wh` across the whole array / within the panel's `PANEL_GROUPS` group (groups under 5 panels rank against the array). NULL when not scored |
+
+Single hours are noisy: the panels' measured total differed from the
+inverter's by up to ±15% in individual hours on a complete day, evening out
+over neighbouring hours — instant readings a few minutes apart, not
+averages. The best panels often finish within 1–2% of each other, so "wins"
+in close hours are near-ties; top-3 counts and average rank are steadier.
 
 ## The two timestamps
 

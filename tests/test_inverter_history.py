@@ -110,3 +110,21 @@ def test_finalized_days_are_not_recomputed_and_retention_keeps_summaries(tmp_pat
     conn = sqlite3.connect(db_path)
     assert conn.execute("SELECT COUNT(*) FROM inverter_readings").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM inverter_daily").fetchone()[0] == 1
+
+
+def test_stuck_counter_that_creeps_forward_is_dropped():
+    # 2026-09-26: after failed reads the inverter served a counter only 2 Wh
+    # ahead of one taken 8 minutes earlier, while producing ~1.1 kW. It isn't
+    # behind the running maximum, so drop_stale() keeps it; drop_lagging()
+    # must not, or it shifts ~140 Wh between neighbouring hours.
+    t0 = datetime(2026, 9, 26, 15, 52, 5, tzinfo=timezone.utc)
+    rows = [
+        _row(t0, 1114, 10_236_085),
+        _row(t0 + timedelta(minutes=7, seconds=52), 1076, 10_236_087),    # stuck
+        _row(t0 + timedelta(minutes=12, seconds=57), 1911, 10_236_317),
+    ]
+    kept = inverter_stats.drop_lagging(rows)
+    assert [r["lifetime_wh"] for r in kept] == [10_236_085, 10_236_317]
+    # Night readings with a flat counter are normal and kept.
+    night = [_row(t0 + timedelta(minutes=m), 0, 10_236_400) for m in range(0, 30, 5)]
+    assert len(inverter_stats.drop_lagging(night)) == len(night)

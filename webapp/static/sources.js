@@ -74,10 +74,11 @@ const ACCURACY = {
   },
   4: {
     title: "Verdict / vs Peers",
-    short: "relative to its panel-model group; can't tell shade from a fault on its own",
-    long: `Each optimizer is compared with the median of its SolarEdge panel-model group in the same
-      15-minute window. Those groups follow SolarEdge's model label, which says nothing about roof
-      orientation, so 100% means "like its group", not "like a well-placed panel". Low output can
+    short: "relative to its peers (whole array unless PANEL_GROUPS is set); can't tell shade from a fault on its own",
+    long: `Each optimizer is compared with the median of its peers in the same 15-minute window — the
+      whole array by default, or its group if PANEL_GROUPS defines groups (e.g. by roof face). Against
+      the whole array, panels on a poorly facing roof read low for that reason alone; 100% means "like
+      its peers", not "healthy". Low output can
       be shade, dirt, orientation or a fault — the data alone can't separate them (the hourly
       profile helps; a site check settles it). When afternoon uploads stall (*2) afternoons are
       under-represented. Always read the Confidence column.`,
@@ -160,6 +161,17 @@ const ACCURACY = {
       matched the delivered ones, which isn't true for a panel shaded only then. No estimate is made on
       days Modbus didn't see in full. <b>Coverage</b> says how much of the producing day had this
       panel's data — below ~90%, compare panels on that day with care.`,
+  },
+  15: {
+    title: "Hourly ranking",
+    short: "only hours with every panel's data are ranked; close finishes are near-ties",
+    long: `Panels are ranked by the energy their own readings add up to within each clock hour. An hour
+      is ranked only if every panel has data in all of its 15-minute windows — otherwise the panel with
+      missing data would lose unfairly — so on days SolarEdge's uploads stall, fewer hours count.
+      Within one hour, readings from different panels are minutes apart and the best panels often finish
+      within 1–2% of each other, so who "wins" a close hour is close to a coin toss; top-3 finishes and
+      average rank are steadier. Whole-array ranks mostly reflect roof placement; ranks within
+      roof-face groups (set in PANEL_GROUPS) cancel that out and are the better pointer to shade or a fault.`,
   },
 };
 
@@ -290,3 +302,29 @@ function seLagBanner(d) {
     reading is analysed at the time it was measured — but the missing hours aren't counted
     until they arrive.</div>`;
 }
+
+// ---------------------------------------------------------------------------
+// Site menu: one definition, inserted at the top of every page that loads
+// this script, with the current page highlighted. The optimizer detail page
+// counts as part of "Panel history".
+const NAV = [
+  { href: "/",            label: "Dashboard",        icon: "▦", pages: ["", "index.html"] },
+  { href: "inverter.html", label: "Inverter history", icon: "⚡", pages: ["inverter.html"] },
+  { href: "panels.html",   label: "Panel history",    icon: "▤", pages: ["panels.html", "optimizer.html"] },
+  { href: "hourly.html",   label: "Hourly ranking",   icon: "🏆", pages: ["hourly.html"] },
+];
+
+function renderNav() {
+  const page = location.pathname.split("/").pop();
+  const links = NAV.map(n => {
+    const active = n.pages.includes(page);
+    return `<a href="${n.href}" class="nav-link${active ? " active" : ""}"${active ? ' aria-current="page"' : ""}>
+      <span class="nav-icon" aria-hidden="true">${n.icon}</span>${n.label}</a>`;
+  }).join("");
+  document.body.insertAdjacentHTML("afterbegin", `
+    <nav class="site-nav" aria-label="Main">
+      <a href="/" class="nav-brand"><span aria-hidden="true">☀</span> SolarMonitor</a>
+      <div class="nav-links">${links}</div>
+    </nav>`);
+}
+document.addEventListener("DOMContentLoaded", renderNav);

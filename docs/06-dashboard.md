@@ -4,6 +4,15 @@
 access only. Auto-refreshes every 30s. Start it with
 `./scripts/webapp_ctl.sh start`.
 
+## Menu
+
+Every page opens with the same menu bar, pinned to the top while scrolling:
+**Dashboard · Inverter history · Panel history · Hourly ranking**, with the
+current page highlighted (an optimizer's detail page counts as Panel
+history). On phones the four links sit in a 2 × 2 grid so none is hidden.
+Defined once in `renderNav()` / `NAV` in `webapp/static/sources.js` — add a
+page there, not in each HTML file.
+
 ## Data health flags
 
 A strip at the top of both pages judges each source *right now*:
@@ -52,7 +61,7 @@ always means SolarEdge delivery lag.
 | *1 | SolarEdge readings are one instant each; near-zero ones are real but individual readings say little |
 | *2 | SolarEdge data is only as current as the inverter's last upload |
 | *3 | Daylight avg/median/max/near-0 come from individual readings |
-| *4 | Verdict / vs Peers are relative to the panel-model group; can't tell shade from fault alone |
+| *4 | Verdict / vs Peers are relative to peers (whole array unless `PANEL_GROUPS` is set); can't tell shade from fault alone |
 | *5 | Per-report energy is shown but not used — not real Wh and tracks the inverter poorly |
 | *6 | Today's peak is the highest 30 s sample captured |
 | *7 | Inverter metering isn't revenue-grade; "now" can be minutes old |
@@ -63,6 +72,7 @@ always means SolarEdge delivery lag.
 | *12 | Average DC power is time-weighted over the readings captured |
 | *13 | Partial day — Modbus didn't see all of production |
 | *14 | Per-panel daily energy: measured (delivered readings only) vs estimated (inverter's energy shared out), and coverage |
+| *15 | Hourly ranking: only complete hours are ranked; close finishes are near-ties; whole-array ranks reflect placement |
 
 ## Status cards
 
@@ -91,6 +101,20 @@ power and delay for the day.
 
 ## Inverter history (`inverter.html`)
 
+The page opens with **Last 7 days — energy hour by hour**: whole-system
+energy in each clock hour from the inverter's own counter. *Compare days*
+draws one line per day across the hours (older days dimmer, today
+brightest, each line named at its end); *Timeline* joins the same days into
+one continuous line. Days without inverter readings are listed, not drawn
+as zero.
+
+Next, **Last 7 days — running total through the day**: energy produced so
+far at each hour boundary, one line per day, ending at the day's total — to
+see whether today is ahead of or behind earlier days at the same time.
+Days the inverter was only partly read are left out (their total would
+start mid-day), and a line stops at a missing hour rather than
+under-reading. Below both:
+
 Every card in the inverter section links here, opened on the matching
 metric: energy per day, peak and average DC power, production hours, grid
 AC voltage range, heatsink temperature and throttled/fault readings, Modbus
@@ -104,14 +128,49 @@ arrived. See `inverter_daily` in [03-data-model.md](03-data-model.md).
 ## Panel history (`panels.html`)
 
 A grid of every panel × every day (14 / 30 / 90 / 365 days), switchable
-between vs peers, estimated energy, measured energy, time near 0 A and
-per-panel data coverage, with a total or median per panel. Colours run red
+between vs peers, estimated energy, measured energy, time near 0 A,
+per-panel data coverage and **change vs previous day**, with a total or
+median per panel.
+
+*Change vs previous day* colours each cell by that panel's energy against
+its own previous day — green ▲ more, red ▼ less, grey ≈ within ±2%, with
+stronger colour for bigger changes — and counts days up / down per panel.
+A **Whole system** row from the inverter's daily total sits on top: day to
+day, weather moves every panel together, so the panel that is red while the
+system is green is the one worth a look. Estimated energy is used when both
+days have it, otherwise measured (never mixed). A day isn't compared when
+it's too incomplete to mean anything — under 75% of its per-panel data, a
+partial inverter day, or the first day of collection (which starts part-way
+through the day) — and shows "·" with the reason on hover. Colours run red
 → green within the metric; dashed cells had under 90% coverage; ⚠ marks days
 the inverter was only partly read. Built for spotting a panel that drifts
 down over weeks. Linked from the Health verdict heading; click a panel for
 its detail page. The detail page itself now opens with that panel's daily
 energy chart (estimated and measured bars, coverage line). See
 `panel_daily` in [03-data-model.md](03-data-model.md).
+
+## Hourly panel ranking (`hourly.html`)
+
+Pick a **date** and an **hour** (or *All day*) and rank against the **whole
+array** or **within each group** (groups come from `PANEL_GROUPS`; with
+the whole-array default the *Within group* button is disabled):
+
+- **One hour**: every panel's energy that hour, highest first, with 🏆 🥈 🥉,
+  % of the hour's best (or of its group's best), average power and coverage,
+  alongside the inverter's own energy for the hour.
+- **All day**: panels × hours grid of energy, shaded by share of the hour's
+  best (single-hue scale, brighter = closer), 🏆 on each hour's winner,
+  faded columns for hours that aren't ranked, and the day's wins / top-3 /
+  average rank per panel. Click an hour header to open its ranking.
+- **Leaderboard** over 7 / 30 / 90 / 365 days: wins, top-3 finishes,
+  average rank and ranked hours, sortable.
+
+Whole-array rankings mostly reflect roof placement; rankings within
+roof-face groups (set in `PANEL_GROUPS`) cancel orientation and are the
+ones to read for shade or faults. Only hours
+where every panel's data arrived are ranked (\*15). Linked from the
+Optimizers heading, the Energy-today total row, the panel history page and
+each detail page. See `panel_hourly` in [03-data-model.md](03-data-model.md).
 
 ## Optimizers table
 
@@ -122,6 +181,14 @@ dark, `STALE` everywhere is expected, not a fault.
 "Last Measurement" is SolarEdge's own timestamp for the reading, **not** when
 we stored it. Because of backfill, a brand-new database will still show old
 timestamps if the hardware hasn't produced anything since.
+
+**Energy today (Wh)** is each panel's estimated energy so far today — the
+inverter's own measured energy shared out by each panel's measured portion
+(see `panel_daily` in [03-data-model.md](03-data-model.md)) — so the total
+row matches the inverter's figure. When the inverter wasn't read all day
+the panel's measured energy is shown instead, marked *measured*; an amber
+"cov." badge means under 90% of today's per-panel data has arrived from
+SolarEdge yet. Hover a cell for estimated, measured and coverage.
 
 Click any row to open that optimizer's history page.
 
@@ -134,7 +201,8 @@ the method.
 |---|---|
 | **Verdict** | GOOD / LIKELY GOOD / WATCH / SUSPECT / BAD / NO DATA |
 | **Score** | 0-100, output-vs-peers multiplied by reporting reliability |
-| **vs Peers** | Average power over its readings as % of its panel-model group's median *in the same 15-minute window*. 100% = producing like its neighbours |
+| **Compared with** | The panel's peer group — "whole array" unless `PANEL_GROUPS` sets groups |
+| **vs Peers** | Average power over its readings as % of its peers' median *in the same 15-minute window*. 100% = producing like its neighbours |
 | **F / S / M** | Fresh / Stale / Missing counts across the polls that observed a scored window (informational) |
 | **Fresh %** | Reliability: share of scored daylight windows it reported in, vs its peers |
 | **Avg/Median/Max W, V, A ☀** | Daylight-only value stats (median, not minimum — see [04](04-analysis-method.md)) |
@@ -187,6 +255,9 @@ All read-only JSON.
 | `/api/errors?limit=` | Failed poll cycles — our problems only |
 | `/api/optimizers/{serial}/daily?days=` | One optimizer's `panel_daily` rows, today live |
 | `/api/panels/daily?days=` | Every optimizer's daily rows plus the inverter's per-day energy — the panel history page |
+| `/api/panels/hourly?date=YYYY-MM-DD` | Every panel's figures for each hour of one day, ranks, and that day's wins / top-3 / average rank (both bases); today live |
+| `/api/panels/leaderboard?days=` | Wins, top-3, average rank and ranked hours per panel over a range, both bases |
+| `/api/inverter/hourly?days=` | Whole-system energy per clock hour for the last N days (max 31), from the inverter's counter |
 | `/api/inverter/history?days=` | One row per day from `inverter_daily`, today recomputed live |
 | `/api/inverter/day?date=YYYY-MM-DD` | That day's raw inverter readings (stale snapshots removed) and summary |
 | `/api/inverter` | Today's Modbus series, peak, energy, Modbus failure rate, cloud delay series |

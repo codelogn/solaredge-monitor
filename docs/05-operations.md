@@ -25,6 +25,7 @@ cp .env.example .env                        # then fill in credentials
 | `DECOMMISSIONED_SERIALS` | Comma-separated serials of physically replaced optimizers, excluded from scoring |
 | `INVERTER_RETENTION_DAYS` | `365`. Days of raw 30-second inverter readings kept (~3,000 rows/day). Daily summaries are kept forever regardless; `0` keeps raw readings forever |
 | `OPTIMIZER_RETENTION_DAYS` | `365`. Days of raw per-optimizer readings kept (~19,000 rows / ~5 MB a day). Per-panel daily summaries are kept forever regardless; `0` keeps raw readings forever |
+| `PANEL_GROUPS` | Who each panel is compared with. Empty = whole array (default); `solaredge` = SolarEdge's panel-model labels; or your own groups by roof face, e.g. `South=1.0.1-1.0.10,1.0.18; North=1.0.17,1.0.19-1.0.24`. See [04](04-analysis-method.md) |
 | `ARRAY_NAMEPLATE_W` | Optional. Total panel rating in watts (e.g. 20 × 365 = `7300`); shown next to today's peak for comparison |
 
 Never commit `.env`, `session/cookies.json` or `data/` — all gitignored.
