@@ -157,3 +157,26 @@ def test_changing_the_grouping_recomputes_stored_history(tmp_path):
     custom = groups.parse("Front=1.0.1; Back=A,B")
     assert panel_daily.refresh(db_path, "UTC", today=date(2026, 9, 25), grouping=custom) == ["2026-09-20"]
     assert panel_daily.refresh(db_path, "UTC", today=date(2026, 9, 25), grouping=custom) == []
+
+
+def test_day_profile_survives_a_collection_gap(tmp_path):
+    # A reboot stopped collection from 08:00 to 10:00. The hours inside the
+    # gap can't be split out, but the running total must pick up again at
+    # 10:00 at the right height — the inverter's counter kept counting.
+    db_path = tmp_path / "t.db"
+    _seed(db_path, {"A": 300.0, "B": 200.0, "C": 100.0})
+    with db.connect(db_path) as conn:
+        conn.execute("INSERT INTO inverter_readings (fetched_at, dc_power, lifetime_wh) "
+                     "VALUES ('2026-09-19T23:00:00Z', 0, 1000000)")      # last night's baseline
+        conn.execute("DELETE FROM inverter_readings WHERE fetched_at >= '2026-09-20T07:55:00Z' "
+                     "AND fetched_at < '2026-09-20T10:00:00Z'")
+        conn.commit()
+    conn = sqlite3.connect(db_path)
+    now = DAY.replace(hour=12, minute=30)
+    prof = panel_daily.inverter_day_profile(conn, DAY.date(), UTC, now=now)
+    assert 8 not in prof["hours"] and 9 not in prof["hours"]          # inside the gap
+    assert abs(prof["hours"][10] - 600 * 0.97) < 3
+    assert abs(prof["cumulative"][10] - 600 * 2 * 0.97) < 10         # 08:00-10:00 still counted
+    assert abs(prof["cumulative"][12] - 600 * 4 * 0.97) < 10
+    assert prof["in_progress"]["hour"] == 12
+    assert abs(prof["in_progress"]["wh"] - 600 * 0.5 * 0.97) < 10   # 12:00-12:30 only

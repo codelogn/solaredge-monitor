@@ -251,7 +251,7 @@ def _load(db_path: Path, hours: int, decommissioned: frozenset):
     try:
         optimizers = [
             o for o in conn.execute(
-                "SELECT serial, label, panel_model FROM optimizers").fetchall()
+                "SELECT serial, label, panel_model, optimizer_model FROM optimizers").fetchall()
             if o["serial"] not in decommissioned
         ]
         # Filtered on fetched_at, never ts_utc — ts_utc is NULL on MISSING
@@ -377,6 +377,7 @@ def score_optimizers(
             "serial": serial,
             "label": opt["label"],
             "panel_model": opt["panel_model"],
+            "optimizer_model": opt["optimizer_model"],
             "group": groups.get(serial) or None,
             "fresh_count": fresh_n,
             "stale_count": stale,
@@ -499,4 +500,165 @@ def hourly_profile(
         "hours_covered": sorted(hours_seen),
         "scored_windows": scored_total,
         "optimizers": profiles,
+    }
+
+
+# --- Roof check: steady voltage, low current -------------------------------
+# A panel's voltage at the optimizer input barely depends on light; its
+# current is proportional to it. So a panel at its neighbours' voltage but
+# with less current is converting less light or losing it on the way:
+# shade, soil, a flatter/other-facing roof plane, damaged cells — or extra
+# resistance in the panel-to-optimizer connectors. WHEN it's low separates
+# these: shade comes and goes with the sun, while dirt, damage and a bad
+# connection hold all day. Voltage well below the neighbours is a different
+# signature again (a failed bypass diode drops ~1/3 of it).
+LOW_CURRENT_RATIO = 0.85     # overall median current vs peers, to be flagged
+LOW_HOUR_RATIO = 0.90        # an hour of day counts as "low" below this
+CONSISTENT_SHARE = 0.75      # share of hours low to call it all-day
+NORMAL_VOLTAGE_RATIO = 0.95  # voltage at least this share of the peers'
+DROPOUT_RATIO = 0.25         # a window under this share of peers' current
+MIN_HOUR_WINDOWS = 3         # windows needed for an hour's median
+MIN_HOURS = 5                # hours of day needed for any verdict
+SHADE_MAX_SHARE = 0.60       # shade covers part of the day, not most of it
+SHADE_MAX_BLOCKS = 2         # ...in one or two stretches (morning / evening)
+SHADE_DIP_RATIO = 0.70       # a shadow worth reporting takes an hour below this
+
+def _blocks(hours: list[int]) -> int:
+    """Number of separate stretches in a sorted list of hours, a one-hour
+    gap still counting as the same stretch (one noisy hour inside a shadow)."""
+    return sum(1 for i, h in enumerate(hours) if i == 0 or h - hours[i - 1] > 2)
+
+
+_WIRING_ORDER = {"LOW VOLTAGE": 0, "CHECK WIRING": 1, "WATCH": 2, "SHADE PATTERN": 3,
+                 "OK": 4, "NOT ENOUGH DATA": 5}
+
+
+def wiring_check(
+    db_path: Path,
+    hours: int = 168,
+    cfg_timezone: str = "UTC",
+    decommissioned: frozenset = frozenset(),
+    grouping: "panel_groups.Grouping | None" = None,
+) -> dict:
+    """Ranks panels by how consistently their current trails their peers'
+    while their voltage keeps up — the "check the connections on the roof"
+    list. Windows are selected per hour of day exactly as hourly_profile
+    does, so early and late hours (where shade shows) aren't thrown away."""
+    optimizers, _, fresh = _load(db_path, hours, decommissioned)
+    tz = ZoneInfo(cfg_timezone)
+    grouping = grouping or panel_groups.WHOLE_ARRAY
+    groups = panel_groups.assign(optimizers, grouping)
+
+    windows = _build_windows(fresh, tz)
+    active = len({s for w in windows.values() for s in w["panel_power"]})
+
+    # serial -> list of (hour, day, voltage ratio, current ratio, volts, amps)
+    obs: dict[str, list[tuple]] = {}
+    scored_total = 0
+    for hour in sorted({w["hour"] for w in windows.values()}):
+        for start in _select_windows(windows, active, hour)["scored"]:
+            w = windows[start]
+            volts: dict[str, list[float]] = {}
+            amps: dict[str, list[float]] = {}
+            for r in w["rows"]:
+                if r["voltage"] is not None and r["current"] is not None:
+                    volts.setdefault(r["optimizer_serial"], []).append(r["voltage"])
+                    amps.setdefault(r["optimizer_serial"], []).append(r["current"])
+            v = {s: sum(x) / len(x) for s, x in volts.items()}
+            a = {s: sum(x) / len(x) for s, x in amps.items()}
+            if not v:
+                continue
+            v_ref, a_ref = _group_medians(v, groups), _group_medians(a, groups)
+            day = datetime.fromtimestamp(start, tz).date().isoformat()
+            scored_total += 1
+            for s in v:
+                rv, ra = _reference_median(s, groups, v_ref), _reference_median(s, groups, a_ref)
+                if rv > 0 and ra > 0:
+                    obs.setdefault(s, []).append((hour, day, v[s] / rv, a[s] / ra, v[s], a[s]))
+
+    dropout_shares = {s: sum(1 for o in l if o[3] < DROPOUT_RATIO) / len(l) for s, l in obs.items() if l}
+    typical_dropout = median(dropout_shares.values()) if dropout_shares else 0.0
+
+    results = []
+    for opt in optimizers:
+        s = opt["serial"]
+        l = obs.get(s, [])
+        by_hour: dict[int, list[float]] = {}
+        by_day: dict[str, list[float]] = {}
+        for hour, day, _, ra, _, _ in l:
+            by_hour.setdefault(hour, []).append(ra)
+            by_day.setdefault(day, []).append(ra)
+        hour_pts = [{"hour": h, "current_ratio_pct": round(100 * median(r), 1), "windows": len(r)}
+                    for h, r in sorted(by_hour.items()) if len(r) >= MIN_HOUR_WINDOWS]
+        day_pts = [{"day": d, "current_ratio_pct": round(100 * median(r), 1), "windows": len(r)}
+                   for d, r in sorted(by_day.items())]
+        v_ratio = median(o[2] for o in l) if l else None
+        a_ratio = median(o[3] for o in l) if l else None
+        low_hours = [p["hour"] for p in hour_pts if p["current_ratio_pct"] < 100 * LOW_HOUR_RATIO]
+        share = len(low_hours) / len(hour_pts) if hour_pts else 0.0
+        dropout = dropout_shares.get(s, 0.0)
+
+        if len(hour_pts) < MIN_HOURS:
+            flag = "NOT ENOUGH DATA"
+        elif v_ratio < NORMAL_VOLTAGE_RATIO:
+            flag = "LOW VOLTAGE"
+        elif a_ratio < LOW_CURRENT_RATIO:
+            if share >= CONSISTENT_SHARE:
+                flag = "CHECK WIRING"
+            elif share <= SHADE_MAX_SHARE and _blocks(low_hours) <= SHADE_MAX_BLOCKS:
+                flag = "SHADE PATTERN"
+            else:
+                flag = "WATCH"       # low, but neither all day nor a clear shadow
+        elif a_ratio < LOW_HOUR_RATIO and share >= CONSISTENT_SHARE:
+            flag = "WATCH"
+        else:
+            flag = "OK"
+        # Fine overall, but a clear notch at the same hours every day: shade.
+        if (flag == "OK" and low_hours and share <= SHADE_MAX_SHARE
+                and _blocks(low_hours) <= SHADE_MAX_BLOCKS
+                and min(p["current_ratio_pct"] for p in hour_pts) < 100 * SHADE_DIP_RATIO):
+            flag = "SHADE PATTERN"
+
+        results.append({
+            "serial": s,
+            "label": opt["label"],
+            "optimizer_model": opt["optimizer_model"],
+            "group": groups.get(s) or None,
+            "flag": flag,
+            "windows": len(l),
+            "voltage_ratio_pct": round(100 * v_ratio, 1) if v_ratio is not None else None,
+            "current_ratio_pct": round(100 * a_ratio, 1) if a_ratio is not None else None,
+            "median_voltage": round(median(o[4] for o in l), 2) if l else None,
+            "median_current": round(median(o[5] for o in l), 3) if l else None,
+            "low_hours": low_hours,
+            "hours_seen": len(hour_pts),
+            "consistency_pct": round(100 * share, 1) if hour_pts else None,
+            "low_days": sum(1 for p in day_pts if p["current_ratio_pct"] < 100 * LOW_HOUR_RATIO),
+            "dropout_pct": round(100 * dropout, 1),
+            # Sudden near-zero current while the neighbours produce: well
+            # above what's normal on this roof is a hint of an intermittent
+            # connection (or a passing shadow — read with the hour profile).
+            "frequent_dropouts": dropout >= max(0.05, 2 * typical_dropout),
+            "hours": hour_pts,
+            "days": day_pts,
+        })
+
+    results.sort(key=lambda r: (_WIRING_ORDER[r["flag"]],
+                                r["current_ratio_pct"] if r["current_ratio_pct"] is not None else 999))
+    for i, r in enumerate(results, 1):
+        r["rank"] = i
+    return {
+        "timezone": cfg_timezone,
+        "grouping": grouping.describe(),
+        "window_minutes": WINDOW_SECONDS // 60,
+        "scored_windows": scored_total,
+        "typical_dropout_pct": round(100 * typical_dropout, 1),
+        "thresholds": {
+            "low_current_pct": round(100 * LOW_CURRENT_RATIO),
+            "low_hour_pct": round(100 * LOW_HOUR_RATIO),
+            "consistent_share_pct": round(100 * CONSISTENT_SHARE),
+            "normal_voltage_pct": round(100 * NORMAL_VOLTAGE_RATIO),
+            "dropout_pct": round(100 * DROPOUT_RATIO),
+        },
+        "optimizers": results,
     }

@@ -46,6 +46,38 @@
   .day-head { writing-mode: vertical-rl; transform: rotate(180deg); height: 58px; }
   .legend-bar { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); margin-top: 10px; flex-wrap: wrap; }
   .swatch { display: inline-block; width: 22px; height: 12px; border-radius: 2px; }
+  /* bottom 6 of that day, marked in the day-by-day grid */
+  table.grid td.bot6 { box-shadow: inset 4px 0 0 #ef4444; }
+  .rank-groups { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 20px; margin: 4px 0 14px; }
+  @media (max-width: 700px) { .rank-groups { grid-template-columns: 1fr; } }
+  .rank-groups .head { font-size: 12px; font-weight: 600; margin-bottom: 6px; }
+  .pill { display: inline-block; padding: 3px 9px; margin: 0 5px 5px 0; border-radius: 999px; font-size: 12px;
+    font-weight: 600; text-decoration: none; }
+  .pill.top { background: rgba(46,204,113,0.15); color: #4ade80; border: 1px solid rgba(46,204,113,0.4); }
+  .pill.bot { background: rgba(229,72,77,0.15); color: #f87171; border: 1px solid rgba(229,72,77,0.4); }
+  table.rank-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.rank-table th, table.rank-table td { padding: 6px 9px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
+  table.rank-table th { color: var(--muted); font-weight: 500; }
+  table.rank-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+  table.rank-table tr.cut td { border-top: 2px solid #f87171; }
+  /* Roof check */
+  .flag { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; letter-spacing: .02em; border: 1px solid; }
+  .flag.f-bad   { color: #f87171; background: rgba(229,72,77,0.14);  border-color: rgba(229,72,77,0.45); }
+  .flag.f-warn  { color: #fbbf24; background: rgba(245,166,35,0.12); border-color: rgba(245,166,35,0.45); }
+  .flag.f-shade { color: #93c5fd; background: rgba(96,165,250,0.12); border-color: rgba(96,165,250,0.45); }
+  .flag.f-ok    { color: #4ade80; background: rgba(46,204,113,0.08); border-color: rgba(46,204,113,0.3); }
+  .flag.f-none  { color: var(--muted); background: none; border-color: var(--border); }
+  .hstrip { display: inline-flex; gap: 2px; vertical-align: middle; }
+  .hstrip span { width: 20px; height: 18px; border-radius: 3px; font-size: 9px; line-height: 18px; text-align: center;
+    color: rgba(255,255,255,0.85); cursor: help; }
+  .hstrip.head { margin-top: 4px; }
+  .hstrip.head span { background: none; color: var(--muted); height: auto; line-height: 1.2; font-size: 10px; }
+  table.rank-table tr.flagged td:first-child { box-shadow: inset 3px 0 0 #f87171; }
+  .checklist { font-size: 12px; color: var(--muted); line-height: 1.6; margin: 12px 0 0; padding-left: 18px; }
+  .checklist b { color: var(--text); }
+  .checklist li.safety { list-style: none; margin-left: -18px; }
+  .safety { font-size: 12px; line-height: 1.5; margin-top: 10px; padding: 8px 12px; border-radius: 8px;
+    background: rgba(245,166,35,0.08); border: 1px solid rgba(245,166,35,0.35); color: var(--text); }
 </style>
 </head>
 <body>
@@ -54,6 +86,29 @@
     <a href="hourly.html">Hourly ranking →</a>
     Click a panel for its detail page.</div>
   <div id="srcLegend"></div>
+
+  <section id="rankSection">
+    <h2><span>Top 14 and bottom 6 — last 30 days<span data-acc="14"></span> <span data-src="calc" data-from="se"></span></span></h2>
+    <p class="desc" id="rankDesc"></p>
+    <div class="rank-groups" id="rankGroups"></div>
+    <div class="scroll-x"><table class="rank-table" id="rankTable"></table></div>
+  </section>
+
+  <section id="wiringSection">
+    <h2>
+      <span>Roof check — steady voltage, low current<span data-acc="16"></span> <span data-src="calc" data-from="se"></span></span>
+      <select id="wiringRange" aria-label="Range for the roof check">
+        <option value="72">Last 3 days</option>
+        <option value="168" selected>Last 7 days</option>
+        <option value="336">Last 14 days</option>
+        <option value="720">Last 30 days</option>
+      </select>
+    </h2>
+    <p class="desc" id="wiringDesc"></p>
+    <div class="rank-groups" id="wiringGroups"></div>
+    <div class="scroll-x"><table class="rank-table" id="wiringTable"></table></div>
+    <ul class="checklist" id="wiringChecklist"></ul>
+  </section>
 
   <section>
     <h2>
@@ -191,9 +246,36 @@ async function load() {
   renderGrid();
 }
 
+// ---- Daily ranking: who produced most / least each day --------------------
+const TOP_N = 14, BOTTOM_N = 6;
+
+// Ranks every panel by one day's energy, or explains why the day can't be
+// ranked fairly. Only complete days count: every panel needs most of its
+// data (a gap would drop it to the bottom for no real reason), and the first
+// day of collection and today are partial by nature. Estimated energy (adds
+// up to the inverter) when every panel has it, otherwise measured — never mixed.
+function rankDay(d, src) {
+  if (d === src.first_recorded_day) return { skip: "first day of collection (started part-way through)" };
+  if (d === isoDaysAgo(0)) return { skip: "today isn't over yet" };
+  const vals = src.values[d] || {};
+  const opts = src.optimizers;
+  const missing = opts.filter(o => !vals[o.serial]);
+  if (missing.length) return { skip: `${missing.length} panel(s) have no data` };
+  const thin = opts.filter(o => (vals[o.serial].coverage_pct ?? 0) < MIN_COMPARE_COVERAGE);
+  if (thin.length) return { skip: `${thin.length} panel(s) under ${MIN_COMPARE_COVERAGE}% of their data` };
+  const est = opts.every(o => vals[o.serial].estimated_wh != null);
+  const energy = Object.fromEntries(opts.map(o => [o.serial, est ? vals[o.serial].estimated_wh : vals[o.serial].measured_wh]));
+  const sorted = Object.values(energy).sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  const rank = Object.fromEntries(Object.entries(energy).map(([s, e]) =>
+    [s, 1 + Object.values(energy).filter(o => o > e).length]));
+  return { energy, rank, median, n: opts.length, basis: est ? "estimated" : "measured" };
+}
+
 function renderGrid() {
   const m = METRICS[metric];
   if (m.special === "change") return renderChange(m);
+  const dayRank = Object.fromEntries(data.days.map(d => [d, rankDay(d, data)]));
   const [kind, from] = m.src;
   document.getElementById("metricTitle").innerHTML = `${m.title}${acc(m.acc)} ${src(kind, from)}`;
   document.getElementById("metricDesc").innerHTML = m.desc;
@@ -228,7 +310,10 @@ function renderGrid() {
         ` · coverage ${f.coverage_pct ?? "—"}% · measured ${Math.round(f.measured_wh ?? 0)} Wh` +
         (f.estimated_wh != null ? ` · estimated ${Math.round(f.estimated_wh)} Wh` : "") +
         (f.finalized ? "" : " · may still change");
-      return `<td class="cell ${low ? "low-cov" : ""}" style="background:${color(scale(v))}" title="${tip}"
+      const dr = dayRank[d];
+      const bottom = dr && dr.rank && dr.rank[o.serial] > dr.n - BOTTOM_N;
+      return `<td class="cell ${low ? "low-cov" : ""} ${bottom ? "bot6" : ""}" style="background:${color(scale(v))}"
+        title="${tip}${dr && dr.rank ? ` · rank ${dr.rank[o.serial]} of ${dr.n} that day${bottom ? " (bottom 6)" : ""}` : ""}"
         data-serial="${o.serial}">${m.fmt(v)}</td>`;
     }).join("");
     let summary = "—";
@@ -236,7 +321,7 @@ function renderGrid() {
       if (m.summary === "sum") summary = (vals.reduce((a, b) => a + b, 0) / 1000).toFixed(1) + " kWh";
       else { const s = [...vals].sort((a, b) => a - b); summary = m.fmt(s[Math.floor(s.length / 2)]); }
     }
-    return `<tr><td class="rowhead"><a href="optimizer.html?serial=${encodeURIComponent(o.serial)}">${pos(o.label)}</a></td>
+    return `<tr><td class="rowhead"><a href="optimizer.html?serial=${encodeURIComponent(o.serial)}">${pos(o.label)}</a>${optChip(o.optimizer_model)}</td>
       <td class="muted">${o.group ?? "—"}</td>${cells}<td class="sum">${summary}</td></tr>`;
   }).join("");
 
@@ -250,7 +335,152 @@ function renderGrid() {
     <span style="margin-left:14px"><span class="swatch" style="outline:1px dashed rgba(245,166,35,0.9);outline-offset:-2px"></span>
       coverage under ${LOW_COVERAGE}%${acc(14)}</span>
     <span style="margin-left:14px">⚠ day the inverter was only partly read${acc(13)}</span>
+    <span style="margin-left:14px"><span class="swatch" style="box-shadow: inset 4px 0 0 #ef4444; background: var(--panel-2)"></span>
+      bottom 6 that day</span>
     <span style="margin-left:14px">hover a cell for details</span>`;
+}
+
+// ---- Top 14 / bottom 6 over the last 30 days -----------------------------
+// ---------------------------------------------------------------------------
+// Roof check: panels at their neighbours' voltage but with less current.
+const WIRING_FLAG = {
+  "LOW VOLTAGE":     { cls: "f-bad",   text: "Low voltage" },
+  "CHECK WIRING":    { cls: "f-bad",   text: "Check wiring" },
+  "WATCH":           { cls: "f-warn",  text: "Watch" },
+  "SHADE PATTERN":   { cls: "f-shade", text: "Shade pattern" },
+  "OK":              { cls: "f-ok",    text: "OK" },
+  "NOT ENOUGH DATA": { cls: "f-none",  text: "Not enough data" },
+};
+const hourShort = h => `${h % 12 === 0 ? 12 : h % 12}${h < 12 ? "a" : "p"}`;
+// Current vs peers: neutral at/above the "low" line, warmer the further below.
+function ratioColour(pct, lowLine) {
+  if (pct == null) return "transparent";
+  if (pct >= lowLine) return `rgba(139,149,171,${Math.min(0.55, 0.18 + (pct - lowLine) / 150)})`;
+  const k = Math.min(1, (lowLine - pct) / 40);
+  return `rgba(229,72,77,${0.3 + 0.6 * k})`;
+}
+
+async function loadWiring() {
+  const hours = document.getElementById("wiringRange").value;
+  const table = document.getElementById("wiringTable");
+  let d;
+  try { d = await getJSON(`/api/wiring?hours=${hours}`); }
+  catch (e) { table.innerHTML = `<tr><td class="empty">Couldn't load the roof check.</td></tr>`; return; }
+  const t = d.thresholds;
+  const rows = d.optimizers;
+  const allHours = [...new Set(rows.flatMap(r => r.hours.map(h => h.hour)))].sort((a, b) => a - b);
+  const days = Math.max(0, ...rows.map(r => r.days.length));
+  const by = f => rows.filter(r => r.flag === f);
+  const check = [...by("LOW VOLTAGE"), ...by("CHECK WIRING")], watch = by("WATCH"), shade = by("SHADE PATTERN");
+  const peers = d.grouping.mode === "array" ? "the whole array" : "its group";
+
+  document.getElementById("wiringDesc").innerHTML =
+    `Every panel's <b>voltage</b> and <b>current</b> compared with ${peers} in the same 15-minute windows of good
+     light (${d.scored_windows} windows over ${days} day${days === 1 ? "" : "s"}). Voltage barely depends on light, current does —
+     so a panel at normal voltage but with <b>less current all day</b> is losing it somewhere: dirt, damaged cells,
+     or the <b>connectors between panel and optimizer</b>. Low only in a morning or evening stretch is a passing
+     <b>shadow</b> instead. <b>Check wiring</b> = current under ${t.low_current_pct}% of peers with ${t.consistent_share_pct}%+
+     of hours low; <b>Low voltage</b> = voltage under ${t.normal_voltage_pct}% (e.g. a failed bypass diode).
+     ${days < 5 ? `<br><span style="color:var(--warn)">Only ${days} day(s) in range — the hour pattern is noisy; 7–14 days is steadier.</span>` : ""}`;
+
+  const pills = (list, cls) => list.length ? list.map(r =>
+    `<a class="pill ${cls}" href="optimizer.html?serial=${encodeURIComponent(r.serial)}">${pos(r.label)}</a>`).join("")
+    : `<span class="muted" style="font-size:12px">none</span>`;
+  document.getElementById("wiringGroups").innerHTML = `
+    <div><div class="head" style="color:#f87171">⚠ Check on the roof — steady voltage, low current all day</div>${pills(check, "bot")}</div>
+    <div><div class="head" style="color:var(--muted)">Watch: ${watch.length ? watch.map(r => pos(r.label)).join(", ") : "none"}
+      · Shade pattern: ${shade.length ? shade.map(r => `${pos(r.label)} (${r.low_hours.map(hourShort).join(" ")})`).join(", ") : "none"}</div></div>`;
+
+  const strip = r => {
+    const m = Object.fromEntries(r.hours.map(h => [h.hour, h]));
+    return `<span class="hstrip">${allHours.map(h => {
+      const p = m[h];
+      return `<span style="background:${ratioColour(p?.current_ratio_pct, t.low_hour_pct)}"
+        title="${hourShort(h)}: ${p ? `current ${Math.round(p.current_ratio_pct)}% of peers (${p.windows} windows)` : "not enough data"}">${p ? Math.round(p.current_ratio_pct) : ""}</span>`;
+    }).join("")}</span>`;
+  };
+  table.innerHTML = `<thead><tr>
+      <th class="num">#</th><th>Panel</th><th>Flag</th>
+      <th class="num" title="Median of the panel's voltage ÷ its peers' in each window">Voltage vs peers</th>
+      <th class="num" title="Median of the panel's current ÷ its peers' in each window">Current vs peers</th>
+      <th>Current vs peers by hour of day<br><span class="hstrip head">${allHours.map(h => `<span>${hourShort(h)}</span>`).join("")}</span></th>
+      <th class="num" title="Hours of day / days with current under ${t.low_hour_pct}% of peers">Low hours · days</th>
+      <th class="num" title="Windows where current fell under ${t.dropout_pct}% of peers' — sudden near-zero output; typical here ${d.typical_dropout_pct}%">Dropouts</th>
+      <th class="num">Median V · A</th>
+    </tr></thead><tbody>${rows.map(r => {
+      const f = WIRING_FLAG[r.flag] || WIRING_FLAG.OK;
+      return `<tr class="${f.cls === "f-bad" ? "flagged" : ""}">
+        <td class="num muted">${r.rank}</td>
+        <td><a href="optimizer.html?serial=${encodeURIComponent(r.serial)}">${pos(r.label)}</a>${optChip(r.optimizer_model)}</td>
+        <td><span class="flag ${f.cls}">${f.text}</span></td>
+        <td class="num" style="${r.voltage_ratio_pct != null && r.voltage_ratio_pct < t.normal_voltage_pct ? "color:#f87171;font-weight:600" : ""}">${r.voltage_ratio_pct != null ? Math.round(r.voltage_ratio_pct) + "%" : "—"}</td>
+        <td class="num" style="${r.current_ratio_pct != null && r.current_ratio_pct < t.low_current_pct ? "color:#f87171;font-weight:600" : ""}">${r.current_ratio_pct != null ? Math.round(r.current_ratio_pct) + "%" : "—"}</td>
+        <td>${strip(r)}</td>
+        <td class="num">${r.low_hours.length}/${r.hours_seen} · ${r.low_days}/${r.days.length}</td>
+        <td class="num" style="${r.frequent_dropouts ? "color:var(--warn);font-weight:600" : ""}">${r.dropout_pct}%${r.frequent_dropouts ? " ⚠" : ""}</td>
+        <td class="num muted">${r.median_voltage != null ? r.median_voltage.toFixed(1) + " V · " + r.median_current.toFixed(2) + " A" : "—"}</td>
+      </tr>`;
+    }).join("")}</tbody>`;
+
+  document.getElementById("wiringChecklist").innerHTML = check.length ? `
+    <li>On <b>${check.map(r => pos(r.label)).join(", ")}</b>: look at the panel surface first (dirt, bird droppings, cracked glass, discoloured cells) — the cheapest cause.</li>
+    <li>Then the <b>two connectors from the panel into the optimizer</b>: fully clicked together, no scorch marks, melting or green corrosion, cables not pinched or chewed.</li>
+    <li>Compare with a neighbouring OK panel, and check that the flagged panels sit on the same roof plane and tilt as their peers — a flatter or other-facing plane also reads low all day.</li>
+    <li class="safety">⚠ Turn the inverter's ON/OFF switch to OFF and wait for its DC voltage to fall before touching any connector — each optimizer then drops to a safe ~1 V. Never pull a connector under load; in doubt, let the installer do it.</li>`
+    : `<li>No panel shows steady voltage with low current all day in this range.</li>`;
+}
+
+async function loadRanking() {
+  let src;
+  try { src = await getJSON("/api/panels/daily?days=30"); } catch (e) { return; }
+  const per = Object.fromEntries(src.optimizers.map(o => [o.serial, { o, ranks: [], shares: [], wh: 0, top: 0, bottom: 0 }]));
+  const used = [], skipped = [];
+  for (const d of src.days) {
+    const r = rankDay(d, src);
+    if (!r.rank) { skipped.push(`${dayShort(d)} (${r.skip})`); continue; }
+    used.push(d);
+    for (const [s, rank] of Object.entries(r.rank)) {
+      const p = per[s]; if (!p) continue;
+      p.ranks.push(rank); p.shares.push(100 * r.energy[s] / r.median); p.wh += r.energy[s];
+      if (rank <= TOP_N) p.top++;
+      if (rank > r.n - BOTTOM_N) p.bottom++;
+    }
+  }
+  const avg = a => a.reduce((x, y) => x + y, 0) / a.length;
+  const rows = Object.values(per).filter(p => p.ranks.length).map(p => ({ ...p, avgRank: avg(p.ranks), avgShare: avg(p.shares) }))
+    .sort((a, b) => a.avgRank - b.avgRank || b.avgShare - a.avgShare);
+  const n = rows.length;
+  rows.forEach((r, i) => { r.cls = i < TOP_N ? "top" : (i >= n - BOTTOM_N ? "bot" : ""); });
+
+  document.getElementById("rankDesc").innerHTML = !used.length
+    ? `No complete days in the last 30 yet — a day counts once every panel has at least ${MIN_COMPARE_COVERAGE}% of its data.`
+    : `Each complete day, all ${n} panels are ranked by that day's energy (1 = most). Over <b>${used.length}</b>
+       complete day${used.length === 1 ? "" : "s"}, panels are split by <b>average daily rank</b> into the top ${TOP_N}
+       and bottom ${BOTTOM_N}. A panel in the bottom ${BOTTOM_N} on most days is consistently weak — usually shade or
+       roof orientation rather than a fault (compare with the hourly ranking). Peers are the whole array, so north-facing
+       panels sit low for that reason alone.` +
+      (skipped.length ? `<br><span class="muted">Not ranked: ${skipped.join(", ")}.</span>` : "");
+  const pill = r => `<a class="pill ${r.cls}" href="optimizer.html?serial=${encodeURIComponent(r.o.serial)}"
+      title="average rank ${r.avgRank.toFixed(1)} · ${r.top} days top ${TOP_N} · ${r.bottom} days bottom ${BOTTOM_N}">${pos(r.o.label)}</a>`;
+  document.getElementById("rankGroups").innerHTML = used.length ? `
+    <div><div class="head" style="color:#4ade80">▲ Top ${TOP_N} — highest producers</div>${rows.filter(r => r.cls === "top").map(pill).join("")}</div>
+    <div><div class="head" style="color:#f87171">▼ Bottom ${BOTTOM_N} — lowest producers</div>${rows.filter(r => r.cls === "bot").map(pill).join("")}</div>` : "";
+  document.getElementById("rankTable").innerHTML = used.length ? `<thead><tr>
+      <th class="num">#</th><th>Panel</th><th>Compared with</th><th>Flag</th>
+      <th class="num" title="Average of its daily rank, 1 = most energy">Avg daily rank</th>
+      <th class="num" title="Average of its energy as a % of that day's median panel">vs day median</th>
+      <th class="num">Days in top ${TOP_N}</th><th class="num">Days in bottom ${BOTTOM_N}</th>
+      <th class="num" title="Energy over the ranked days (${rows[0] ? "" : ""}estimated where available)">Energy (kWh)</th>
+    </tr></thead><tbody>${rows.map((r, i) => `<tr class="${i === n - BOTTOM_N ? "cut" : ""}">
+      <td class="num muted">${i + 1}</td>
+      <td><a href="optimizer.html?serial=${encodeURIComponent(r.o.serial)}">${pos(r.o.label)}</a>${optChip(r.o.optimizer_model)}</td>
+      <td class="muted">${r.o.group ?? "whole array"}</td>
+      <td>${r.cls === "top" ? `<span class="pill top">Top ${TOP_N}</span>` : r.cls === "bot" ? `<span class="pill bot">Bottom ${BOTTOM_N}</span>` : ""}</td>
+      <td class="num">${r.avgRank.toFixed(1)}</td>
+      <td class="num">${r.avgShare.toFixed(0)}%</td>
+      <td class="num">${r.top} / ${r.ranks.length}</td>
+      <td class="num">${r.bottom} / ${r.ranks.length}</td>
+      <td class="num">${(r.wh / 1000).toFixed(1)}</td></tr>`).join("")}</tbody>` : "";
 }
 
 function renderChange(m) {
@@ -300,7 +530,7 @@ function renderChange(m) {
         ` · coverage ${b.coverage_pct ?? "—"}% → ${a.coverage_pct ?? "—"}%` + (a.finalized ? "" : " · may still change");
       return cell(pct, tip, incomplete, o.serial);
     }).join("");
-    return `<tr><td class="rowhead"><a href="optimizer.html?serial=${encodeURIComponent(o.serial)}">${pos(o.label)}</a></td>
+    return `<tr><td class="rowhead"><a href="optimizer.html?serial=${encodeURIComponent(o.serial)}">${pos(o.label)}</a>${optChip(o.optimizer_model)}</td>
       <td class="muted">${o.group ?? "—"}</td>${cells}<td class="sum">${updown(vals)}</td></tr>`;
   }).join("");
 
@@ -324,11 +554,14 @@ function renderChange(m) {
 }
 
 document.getElementById("srcLegend").innerHTML = srcLegend();
-document.getElementById("accKeyHolder").innerHTML = accKey([2, 3, 4, 13, 14]);
+document.getElementById("accKeyHolder").innerHTML = accKey([2, 3, 4, 13, 14, 16]);
 fillMarkers();
 document.getElementById("rangeSelect").addEventListener("change", load);
 renderTabs();
 load();
+loadRanking();
+loadWiring();
+document.getElementById("wiringRange").addEventListener("change", loadWiring);
 </script>
 </body>
 </html>

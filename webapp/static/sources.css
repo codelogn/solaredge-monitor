@@ -18,6 +18,18 @@ th.from-calc { box-shadow: inset 0 -2px 0 #f0abfc; }
 .src-legend .src { margin: 0 4px 0 10px; }
 .src-legend .src:first-of-type { margin-left: 6px; }
 
+/* Optimizer model chip — see optChip() in sources.js. */
+.opt-chip {
+  display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 4px;
+  font-size: 10px; font-weight: 600; line-height: 15px; vertical-align: middle;
+  border: 1px solid; white-space: nowrap; cursor: help; font-variant-numeric: tabular-nums;
+}
+.opt-chip.m0 { color: #60a5fa; border-color: rgba(96,165,250,0.5);  background: rgba(96,165,250,0.08); }
+.opt-chip.m1 { color: #94a3b8; border-color: rgba(148,163,184,0.5); background: rgba(148,163,184,0.08); }
+.opt-chip.m2 { color: #e2c08d; border-color: rgba(226,192,141,0.5); background: rgba(226,192,141,0.08); }
+.opt-chip.m3 { color: #fda4af; border-color: rgba(253,164,175,0.5); background: rgba(253,164,175,0.08); }
+.opt-chip.inactive { color: var(--muted); border-color: var(--border); border-style: dashed; background: none; }
+
 /* Accuracy markers — see ACCURACY in sources.js. */
 .acc {
   color: var(--warn); font-weight: 700; font-size: 11px; vertical-align: super;
@@ -76,8 +88,23 @@ th.from-calc { box-shadow: inset 0 -2px 0 #f0abfc; }
 .nav-link:hover { color: var(--text); background: var(--panel-2); }
 .nav-link.active { color: var(--text); background: rgba(79,140,255,0.16); border-color: rgba(79,140,255,0.55); }
 .nav-icon { font-size: 13px; opacity: .85; }
+/* Auto-refresh countdown — see autoRefresh() in sources.js. */
+.refresh-timer {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 10px; border-radius: 999px; font: inherit; font-size: 12px;
+  color: var(--muted); background: var(--panel); border: 1px solid var(--border);
+  cursor: pointer; white-space: nowrap; font-variant-numeric: tabular-nums;
+}
+.refresh-timer:hover { color: var(--text); border-color: rgba(79,140,255,0.55); }
+.refresh-timer b { color: var(--text); font-weight: 600; min-width: 2.6em; text-align: right; }
+.refresh-timer .ring { width: 14px; height: 14px; flex: none; transform: rotate(-90deg); }
+.refresh-timer .ring circle { fill: none; stroke-width: 2.5; }
+.refresh-timer .ring .track { stroke: var(--border); }
+.refresh-timer .ring .left { stroke: #4f8cff; stroke-linecap: round; transition: stroke-dashoffset 1s linear; }
+.refresh-timer.busy .ring .left { stroke: #f5c542; }
 @media (max-width: 700px) {
   html body { padding: 16px; }
+  .refresh-timer { position: absolute; top: 8px; right: 16px; padding: 3px 9px; }
   .site-nav { margin: -16px -16px 16px; padding: 8px 16px; flex-direction: column; align-items: stretch; gap: 6px; }
   /* All four links visible without swiping: a 2 x 2 grid. */
   .nav-links { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; overflow: visible; }

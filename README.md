@@ -32,6 +32,10 @@ the roof.
 - **Hourly ranking**: every panel's energy for any hour of any day, ranked
   across the whole array or within its group, with each hour's winner and
   a leaderboard of wins, top-3 finishes and average rank.
+- **Roof check**: panels ranked by how consistently their current trails
+  their peers' while their voltage keeps up — flagged *check wiring* when
+  it's low all day, *shade pattern* when it's a stretch of hours, *low
+  voltage* for a lost cell string — with an hour-by-hour strip per panel.
 - Every number on the dashboard is tagged with where it came from (inverter,
   SolarEdge, or computed) and flagged when it may not be exact, and live
   flags say when either source can't currently be trusted — for example

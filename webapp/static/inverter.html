@@ -442,9 +442,9 @@ async function loadWeek() {
 // after a missing hour the total is unknown, so the line stops there rather
 // than under-reading; days the inverter was only partly read are left out.
 function renderCumulative() {
-  const usable = week.days.filter(d => d.total_wh != null && !d.partial);
-  const skipped = week.days.filter(d => d.total_wh != null && d.partial).map(d => dayLabel(d.day));
-  const none = week.days.filter(d => d.total_wh == null).map(d => dayLabel(d.day));
+  const usable = week.days.filter(d => !d.partial && Object.keys(d.cumulative || {}).length);
+  const skipped = week.days.filter(d => d.partial && d.first_reading_at).map(d => dayLabel(d.day));
+  const none = week.days.filter(d => !d.first_reading_at).map(d => dayLabel(d.day));
   document.getElementById("cumNote").textContent = [
     skipped.length ? `${skipped.join(", ")} left out — the inverter was only read for part of the day, so a running total would start mid-day.` : "",
     none.length ? `No inverter readings for ${none.join(", ")}.` : "",
@@ -452,20 +452,18 @@ function renderCumulative() {
   if (cumChart) cumChart.destroy();
   if (!usable.length) return;
 
+  // Running total straight from the inverter's counter (produced since the
+  // day began), so a collection gap only hides the hours inside it — the
+  // line picks up afterwards at the right height.
   const producing = usable.flatMap(d => Object.entries(d.hours).filter(([, wh]) => wh > 5).map(([h]) => +h));
-  const lo = Math.max(0, Math.min(...producing) - 1), hi = Math.min(23, Math.max(...producing) + 1);
-  const bounds = Array.from({ length: hi - lo + 2 }, (_, i) => lo + i);      // hour boundaries
-  const series = usable.map(d => {
-    let total = 0, broken = false;
-    return bounds.map((b, i) => {
-      if (i === 0) return 0;
-      const wh = d.hours[String(b - 1)];
-      if (wh == null) { broken = true; return null; }
-      if (broken) return null;
-      total += wh;
-      return total / 1000;
-    });
-  });
+  const known = usable.flatMap(d => Object.keys(d.cumulative).map(Number));
+  const lo = Math.max(0, Math.min(...(producing.length ? producing : known)) - 1);
+  const hi = Math.min(24, Math.max(...(producing.length ? producing.map(h => h + 2) : known)));
+  const bounds = Array.from({ length: hi - lo + 1 }, (_, i) => lo + i);      // hour boundaries
+  const series = usable.map(d => bounds.map(b => {
+    const v = d.cumulative[String(b)];
+    return v == null ? null : v / 1000;
+  }));
   const kwh = wh => (wh / 1000).toFixed(2) + " kWh";
   const boundLabel = b => `${b % 12 === 0 ? 12 : b % 12}${b < 12 || b === 24 ? "a" : "p"}`;
   cumChart = new Chart(document.getElementById("cumChart"), {
@@ -478,7 +476,7 @@ function renderCumulative() {
         data: series[i],
         borderColor: dayShade(i, usable.length), backgroundColor: dayShade(i, usable.length),
         borderWidth: d.is_today ? 3 : 2, pointRadius: d.is_today ? 3 : 0, pointHoverRadius: 5,
-        tension: 0.2, spanGaps: false,
+        tension: 0.2, spanGaps: true,   // exact counter totals either side of a missing hour
         endLabel: d.is_today ? "Today" : new Date(d.day + "T12:00:00Z").toLocaleDateString([], { weekday: "short", timeZone: "UTC" }),
         isToday: d.is_today,
       })),
@@ -504,11 +502,21 @@ function renderCumulative() {
 }
 
 function renderWeek() {
-  const days = week.days.filter(d => d.total_wh != null);
-  const missing = week.days.filter(d => d.total_wh == null).map(d => dayLabel(d.day));
-  document.getElementById("weekNote").textContent = missing.length
-    ? `No inverter readings for ${missing.join(", ")} — Modbus wasn't reading then, so those days are left out rather than drawn as zero.`
-    : "";
+  const hasData = d => Object.keys(d.hours).length || d.in_progress;
+  const days = week.days.filter(hasData);
+  const missing = week.days.filter(d => !hasData(d) && !d.first_reading_at).map(d => dayLabel(d.day));
+  const clockOf = iso => new Date(iso).toLocaleTimeString([], { timeZone: week.timezone, hour: "numeric", minute: "2-digit" });
+  const gapNotes = week.days.filter(d => d.first_reading_at).map(d => {
+    // A day whose readings start well after midnight had a collection gap.
+    const first = new Date(d.first_reading_at), midnight = new Date(d.day + "T00:00:00");
+    return d.is_today && (first - midnight) / 3600e3 > 2 && Object.keys(d.hours).length < 24
+      ? `Today: recording resumed at ${clockOf(d.first_reading_at)} after a gap — earlier hours can't be split out, but the running total below still counts them (the inverter's counter kept going).`
+      : null;
+  }).filter(Boolean);
+  document.getElementById("weekNote").textContent = [
+    missing.length ? `No inverter readings for ${missing.join(", ")} — Modbus wasn't reading then, so those days are left out rather than drawn as zero.` : "",
+    ...gapNotes,
+  ].filter(Boolean).join(" ");
   if (weekChart) weekChart.destroy();
   if (!days.length) {
     document.getElementById("weekDesc").textContent = "No inverter readings in the last 7 days yet.";
@@ -522,7 +530,8 @@ function renderWeek() {
       `Whole-system energy in each clock hour, one line per day, from the inverter's own counter.
        Same shape on different days = consistent sun and shade; a dip on one day only = cloud.
        Older days are dimmer; today is brightest and stops at the current hour. Hover an hour to compare days.`;
-    const used = days.flatMap(d => Object.entries(d.hours).filter(([, wh]) => wh > 5).map(([h]) => +h));
+    const used = days.flatMap(d => Object.entries(d.hours).filter(([, wh]) => wh > 5).map(([h]) => +h)
+      .concat(d.in_progress ? [d.in_progress.hour] : []));
     const lo = Math.max(0, Math.min(...used) - 1), hi = Math.min(23, Math.max(...used) + 1);
     const hours = Array.from({ length: hi - lo + 1 }, (_, i) => lo + i);
     weekChart = new Chart(document.getElementById("weekChart"), {
@@ -532,9 +541,13 @@ function renderWeek() {
         labels: hours.map(hourShort),
         datasets: days.map((d, i) => ({
           label: legendName(d),
-          data: hours.map(h => d.hours[String(h)] ?? null),
+          data: hours.map(h => d.hours[String(h)] ??
+            (d.in_progress && d.in_progress.hour === h ? d.in_progress.wh : null)),
+          soFarIndex: d.in_progress ? hours.indexOf(d.in_progress.hour) : -1,
+          soFarUntil: d.in_progress ? d.in_progress.until : null,
           borderColor: dayShade(i, days.length), backgroundColor: dayShade(i, days.length),
           borderWidth: d.is_today ? 3 : 2, pointRadius: d.is_today ? 3 : 0, pointHoverRadius: 5,
+          pointBackgroundColor: ctx => ctx.dataIndex === (d.in_progress ? hours.indexOf(d.in_progress.hour) : -1) ? "#161d2e" : dayShade(i, days.length),
           tension: 0.25, spanGaps: false,
           endLabel: d.is_today ? "Today" : new Date(d.day + "T12:00:00Z").toLocaleDateString([], { weekday: "short", timeZone: "UTC" }),
           isToday: d.is_today,
@@ -553,7 +566,8 @@ function renderWeek() {
           legend: { labels: { color: "#e6ebf5", boxHeight: 3 } },
           tooltip: { callbacks: {
             title: items => items.length ? hourRange(hours[items[0].dataIndex]) : "",
-            label: item => ` ${item.dataset.label.split(" · ")[0]}: ${item.parsed.y == null ? "—" : Math.round(item.parsed.y) + " Wh"}`,
+            label: item => ` ${item.dataset.label.split(" · ")[0]}: ${item.parsed.y == null ? "—" : Math.round(item.parsed.y) + " Wh"}` +
+              (item.dataIndex === item.dataset.soFarIndex ? ` so far (hour in progress, until ${new Date(item.dataset.soFarUntil).toLocaleTimeString([], { timeZone: week.timezone, hour: "numeric", minute: "2-digit" })})` : ""),
           } },
         },
       },
@@ -601,7 +615,7 @@ document.querySelectorAll("#weekMode .tab").forEach(b => b.addEventListener("cli
   renderWeek();
 }));
 loadWeek();
-setInterval(loadWeek, 5 * 60 * 1000);   // today's line grows through the day
+autoRefresh(loadWeek, 5 * 60 * 1000);   // today's line grows through the day
 </script>
 </body>
 </html>

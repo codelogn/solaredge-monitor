@@ -10,6 +10,14 @@ Every page opens with the same menu bar, pinned to the top while scrolling:
 **Dashboard · Inverter history · Panel history · Hourly ranking**, with the
 current page highlighted (an optimizer's detail page counts as Panel
 history). On phones the four links sit in a 2 × 2 grid so none is hidden.
+
+Pages that refresh themselves show a **countdown to the next update** at the
+right of the menu bar (a ring that empties, plus seconds); click it to
+refresh now. Dashboard every 30 s, hourly ranking every 2 min (only while
+showing today; hidden otherwise), inverter history every 5 min. The dashboard
+repeats it in the "Inverter today" header. `autoRefresh()` in `sources.js`.
+On load and after each refresh, card numbers roll from their previous value
+to the new one (`animateCounters()`; off when the OS asks for reduced motion).
 Defined once in `renderNav()` / `NAV` in `webapp/static/sources.js` — add a
 page there, not in each HTML file.
 
@@ -73,6 +81,7 @@ always means SolarEdge delivery lag.
 | *13 | Partial day — Modbus didn't see all of production |
 | *14 | Per-panel daily energy: measured (delivered readings only) vs estimated (inverter's energy shared out), and coverage |
 | *15 | Hourly ranking: only complete hours are ranked; close finishes are near-ties; whole-array ranks reflect placement |
+| *16 | Roof check: points at where to look; can't tell dirt from a bad connector; whole-array peers include roof-plane differences |
 
 ## Status cards
 
@@ -108,12 +117,20 @@ brightest, each line named at its end); *Timeline* joins the same days into
 one continuous line. Days without inverter readings are listed, not drawn
 as zero.
 
+Today's line also shows the **hour in progress** (hollow point, "so far" on
+hover), so something appears right after a restart rather than only once a
+full clock hour has been recorded. Hours inside a collection gap (e.g. a
+server reboot) can't be split out and are left blank, and the note under
+the chart says when recording resumed.
+
 Next, **Last 7 days — running total through the day**: energy produced so
 far at each hour boundary, one line per day, ending at the day's total — to
 see whether today is ahead of or behind earlier days at the same time.
-Days the inverter was only partly read are left out (their total would
-start mid-day), and a line stops at a missing hour rather than
-under-reading. Below both:
+It is read straight from the inverter's lifetime counter (produced since
+the day began), not summed from hours, so after a collection gap the line
+picks up again at the right height — the counter kept counting while nothing
+was being recorded. Days the inverter was only partly read with no reading
+the night before are left out (their total would start mid-day). Below both:
 
 Every card in the inverter section links here, opened on the matching
 metric: energy per day, peak and average DC power, production hours, grid
@@ -126,6 +143,16 @@ per-panel coverage below 100% means part of that day's SolarEdge data never
 arrived. See `inverter_daily` in [03-data-model.md](03-data-model.md).
 
 ## Panel history (`panels.html`)
+
+The page opens with **Top 14 and bottom 6 — last 30 days**. On each complete
+day all panels are ranked by that day's energy (estimated when every panel
+has it, otherwise measured); over the 30 days they are split by **average
+daily rank** into the top 14 and bottom 6, with days in the top 14, days in
+the bottom 6, average share of the day's median panel and energy per panel.
+Only complete days are ranked — every panel needs at least 75% of its data,
+and the first day of collection and today are skipped — so a data gap can't
+push a panel into the bottom 6; the skipped days and reasons are listed. In
+the grid below, each day's bottom 6 carry a red marker on the left edge.
 
 A grid of every panel × every day (14 / 30 / 90 / 365 days), switchable
 between vs peers, estimated energy, measured energy, time near 0 A,
@@ -149,6 +176,18 @@ its detail page. The detail page itself now opens with that panel's daily
 energy chart (estimated and measured bars, coverage line). See
 `panel_daily` in [03-data-model.md](03-data-model.md).
 
+### Roof check — steady voltage, low current
+
+Second section of the panel history page (range 3 / 7 / 14 / 30 days,
+default 7). Every panel ranked by its flag, then current vs peers: **Check
+wiring**, **Low voltage**, **Watch**, **Shade pattern**, **OK** (rules in
+[04-analysis-method.md](04-analysis-method.md#roof-check-steady-voltage-low-current-wiring_check)).
+Columns: voltage and current vs peers, an hour-of-day strip (current vs
+peers per hour, red below 90%), low hours and low days, dropouts, and median
+V · A. Under the table, a checklist of what to inspect on the flagged panels
+and a safety note: switch the inverter off (optimizers drop to ~1 V) before
+touching any connector. \*16.
+
 ## Hourly panel ranking (`hourly.html`)
 
 Pick a **date** and an **hour** (or *All day*) and rank against the **whole
@@ -171,6 +210,16 @@ ones to read for shade or faults. Only hours
 where every panel's data arrived are ranked (\*15). Linked from the
 Optimizers heading, the Energy-today total row, the panel history page and
 each detail page. See `panel_hourly` in [03-data-model.md](03-data-model.md).
+
+## Optimizer model chips
+
+Next to each panel, in every table, a small chip shows the optimizer's model
+family from SolarEdge's layout (`P400`, `P370`, …; hover for the full part
+number). The same family has the same colour on every page, so mixed models
+in one string — e.g. warranty replacements of a different model — are easy
+to spot. A dashed **inactive** chip (dashboard optimizers table) marks an
+optimizer the layout still lists but no longer reports: usually a replaced
+unit that was never removed from the layout.
 
 ## Optimizers table
 
@@ -224,6 +273,8 @@ light, or readings not taken close enough together.
 
 `optimizer.html?serial=...` — reached by clicking any row.
 
+- **Hardware line** — the optimizer's full model number, SolarEdge's panel
+  label, and its ACTIVE/INACTIVE state in the layout.
 - **Verdict banner** — score, output vs peers, reporting %, and confidence,
   with an explicit warning when confidence is weak.
 - **Cards** — freshness and F/S/M (daylight), whether it's currently
@@ -249,6 +300,7 @@ All read-only JSON.
 | `/api/cycles?hours=` | Cycle completeness, failures by type, request count |
 | `/api/health?hours=&hour_of_day=` | Verdicts and daylight value stats |
 | `/api/hourly?hours=` | Output vs peers by hour, per optimizer |
+| `/api/wiring?hours=` | Roof check: voltage and current vs peers, flag, rank, hour and day breakdown per panel |
 | `/api/optimizers` | Latest reading per optimizer |
 | `/api/optimizers/{serial}/readings?hours=` | Raw history |
 | `/api/optimizers/{serial}/analysis?hours=` | Gaps, coverage, stuck time |

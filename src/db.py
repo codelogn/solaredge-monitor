@@ -30,6 +30,10 @@ CREATE TABLE IF NOT EXISTS optimizers (
     -- than against one array-wide median. Observed 2.5x between this site's
     -- two groups, which would otherwise read as ten failing panels.
     panel_model  TEXT,
+    -- The optimizer's own part number (e.g. P400-..., P370-...). Warranty
+    -- replacements can be a different model from the originals.
+    optimizer_model TEXT,
+    layout_status   TEXT,          -- ACTIVE / INACTIVE in SolarEdge's layout
     first_seen   TEXT NOT NULL,
     last_seen    TEXT NOT NULL
 );
@@ -218,26 +222,31 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
     nullable column would throw away collected readings, which are not
     reproducible."""
     existing = {r[1] for r in conn.execute("PRAGMA table_info(optimizers)")}
-    if "panel_model" not in existing:
-        conn.execute("ALTER TABLE optimizers ADD COLUMN panel_model TEXT")
+    for col in ("panel_model", "optimizer_model", "layout_status"):
+        if col not in existing:
+            conn.execute(f"ALTER TABLE optimizers ADD COLUMN {col} TEXT")
 
 
 def upsert_optimizers(db_path: Path, optimizers: list[dict]) -> None:
-    """optimizers: list of {"serial": str, "label": str, "panel_model": str}."""
+    """optimizers: list of {"serial", "label", "panel_model", "optimizer_model",
+    "layout_status"}. A missing model/status keeps the stored one."""
     now = _now()
     with connect(db_path) as conn:
         for opt in optimizers:
             conn.execute(
                 """
-                INSERT INTO optimizers (serial, label, panel_model, first_seen, last_seen)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO optimizers (serial, label, panel_model, optimizer_model,
+                                        layout_status, first_seen, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(serial) DO UPDATE SET
                     label = excluded.label,
                     panel_model = excluded.panel_model,
+                    optimizer_model = COALESCE(excluded.optimizer_model, optimizer_model),
+                    layout_status = COALESCE(excluded.layout_status, layout_status),
                     last_seen = excluded.last_seen
                 """,
-                (opt["serial"], opt.get("label", opt["serial"]),
-                 opt.get("panel_model"), now, now),
+                (opt["serial"], opt.get("label", opt["serial"]), opt.get("panel_model"),
+                 opt.get("optimizer_model"), opt.get("layout_status"), now, now),
             )
         conn.commit()
 

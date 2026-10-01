@@ -154,10 +154,9 @@ def _next_hour_start(t: datetime, tz: ZoneInfo) -> datetime:
     return (local + timedelta(hours=1)).astimezone(timezone.utc)
 
 
-def _inverter_hour_energy(conn, start: str, end: str, tz: ZoneInfo) -> dict[int, float]:
-    """{local hour: Wh} from the rise of the inverter's lifetime counter,
-    interpolated at each hour boundary. Hours whose boundaries aren't
-    bracketed by readings close enough together are left out."""
+def _counter_points(conn, start: str, end: str) -> list[tuple[datetime, float]]:
+    """(time, lifetime Wh) inverter readings around [start, end), with stale
+    and stuck snapshots removed."""
     rows = drop_lagging(drop_stale([
         {"fetched_at": t, "lifetime_wh": lt, "dc_power": p} for t, lt, p in conn.execute(
             "SELECT fetched_at, lifetime_wh, dc_power FROM inverter_readings WHERE lifetime_wh IS NOT NULL "
@@ -165,25 +164,99 @@ def _inverter_hour_energy(conn, start: str, end: str, tz: ZoneInfo) -> dict[int,
             "AND fetched_at <= strftime('%Y-%m-%dT%H:%M:%SZ', ?, '+15 minutes') ORDER BY fetched_at",
             (start, end))
     ]))
-    pts = [(parse_ts(r["fetched_at"]), r["lifetime_wh"]) for r in rows]
+    return [(parse_ts(r["fetched_at"]), r["lifetime_wh"]) for r in rows]
 
-    def counter_at(t: datetime) -> float | None:
-        for (t0, v0), (t1, v1) in zip(pts, pts[1:]):
-            if t0 <= t <= t1:
-                gap = (t1 - t0).total_seconds()
-                if gap > BOUNDARY_MAX_GAP_SECONDS:
-                    return None
-                return v0 if gap == 0 else v0 + (v1 - v0) * (t - t0).total_seconds() / gap
-        return None
 
+def _counter_at(pts: list[tuple[datetime, float]], t: datetime) -> float | None:
+    """The lifetime counter at time t, interpolated between the readings
+    either side — None if they're more than BOUNDARY_MAX_GAP_SECONDS apart."""
+    # A reading exactly at t is the answer, even when the reading before it
+    # is far away — e.g. collection resuming on the hour after an outage.
+    for tt, v in pts:
+        if tt == t:
+            return v
+    for (t0, v0), (t1, v1) in zip(pts, pts[1:]):
+        if t0 < t < t1:
+            gap = (t1 - t0).total_seconds()
+            return None if gap > BOUNDARY_MAX_GAP_SECONDS else v0 + (v1 - v0) * (t - t0).total_seconds() / gap
+    return None
+
+
+def _inverter_hour_energy(conn, start: str, end: str, tz: ZoneInfo) -> dict[int, float]:
+    """{local hour: Wh} from the rise of the inverter's lifetime counter,
+    interpolated at each hour boundary. Hours whose boundaries aren't
+    bracketed by readings close enough together are left out."""
+    pts = _counter_points(conn, start, end)
     out: dict[int, float] = {}
     t, stop = parse_ts(start), parse_ts(end)
     while t < stop:
         nxt = _next_hour_start(t, tz)
-        a, b = counter_at(t), counter_at(nxt)
+        a, b = _counter_at(pts, t), _counter_at(pts, nxt)
         if a is not None and b is not None:
             out[_local_hour(t, tz)] = round(b - a, 1)
         t = nxt
+    return out
+
+
+def inverter_day_profile(conn, day: date, tz: ZoneInfo, now: datetime | None = None) -> dict:
+    """Whole-system energy through one site-local day, from the inverter's
+    lifetime counter:
+
+      hours        {hour: Wh} for complete clock hours (both boundaries known)
+      cumulative   {hour boundary: Wh produced since the day began}; boundary
+                   24 is midnight. Needs the day's starting counter (the last
+                   reading before midnight, if within 12 h — nights don't
+                   produce), then only each boundary's own counter, so it
+                   carries on straight after a collection gap even though the
+                   hours inside the gap are unknown.
+      in_progress  today only: the current hour so far {hour, wh, until,
+                   partial_start} — partial_start when collection resumed
+                   part-way through the hour
+      energy_wh    produced so far (or all day), when the start is known
+    """
+    start, end = day_bounds(day, tz)
+    pts = _counter_points(conn, start, end)
+    day_start, day_end = parse_ts(start), parse_ts(end)
+    inside = [(t, v) for t, v in pts if day_start <= t < day_end]
+    out = {"hours": _inverter_hour_energy(conn, start, end, tz), "cumulative": {},
+           "in_progress": None, "energy_wh": None,
+           "first_reading_at": inside[0][0].strftime("%Y-%m-%dT%H:%M:%SZ") if inside else None,
+           "last_reading_at": inside[-1][0].strftime("%Y-%m-%dT%H:%M:%SZ") if inside else None}
+    if not inside:
+        return out
+
+    base_row = conn.execute(
+        "SELECT fetched_at, lifetime_wh FROM inverter_readings WHERE lifetime_wh IS NOT NULL "
+        "AND fetched_at < ? ORDER BY fetched_at DESC LIMIT 1", (start,)).fetchone()
+    baseline = None
+    if base_row and (inside[0][0] - parse_ts(base_row[0])).total_seconds() <= 12 * 3600:
+        baseline = base_row[1]
+    if baseline is not None:
+        t = day_start
+        while t <= day_end:
+            c = _counter_at(pts, t)
+            if c is not None and t <= inside[-1][0]:
+                h = 24 if t == day_end else _local_hour(t, tz)
+                out["cumulative"][h] = round(max(0.0, c - baseline), 1)
+            if t == day_end:
+                break
+            t = _next_hour_start(t, tz)
+        out["energy_wh"] = round(inside[-1][1] - baseline, 1)
+
+    now = now or datetime.now(timezone.utc)
+    upto_now = [(t, v) for t, v in inside if t <= now]
+    if day_start <= now < day_end and upto_now:
+        last_t, last_v = upto_now[-1]
+        hour_start = last_t.astimezone(tz).replace(minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+        begin = _counter_at(pts, hour_start)
+        partial = begin is None
+        if partial:       # collection resumed part-way through this hour
+            first_in_hour = next(((t, v) for t, v in inside if t >= hour_start), None)
+            begin = first_in_hour[1] if first_in_hour else None
+        if begin is not None:
+            out["in_progress"] = {"hour": _local_hour(last_t, tz), "wh": round(last_v - begin, 1),
+                                  "until": last_t.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                  "partial_start": partial}
     return out
 
 

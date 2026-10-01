@@ -99,7 +99,7 @@ def _grouping() -> panel_groups.Grouping:
 
 def _optimizer_list(conn) -> list[dict]:
     """Active optimizers with the group each is compared within."""
-    rows = [dict(r) for r in conn.execute("SELECT serial, label, panel_model FROM optimizers")
+    rows = [dict(r) for r in conn.execute("SELECT serial, label, panel_model, optimizer_model, layout_status FROM optimizers")
             if r["serial"] not in cfg.decommissioned]
     groups = panel_groups.assign(rows, _grouping())
     for r in rows:
@@ -170,7 +170,7 @@ def optimizers():
     with _connect() as conn:
         rows = conn.execute(
             """
-            SELECT o.serial, o.label,
+            SELECT o.serial, o.label, o.optimizer_model, o.layout_status,
                    r.ts_utc, r.voltage, r.optimizer_voltage, r.current, r.power,
                    latest.status AS latest_status, latest.fetched_at AS latest_fetched_at
             FROM optimizers o
@@ -224,7 +224,8 @@ def optimizer_readings(serial: str, hours: int = 24, limit: int = 20000):
 def optimizer_analysis(serial: str, hours: int = 24):
     with _connect() as conn:
         opt = conn.execute(
-            "SELECT label FROM optimizers WHERE serial = ?", (serial,)
+            "SELECT label, panel_model, optimizer_model, layout_status FROM optimizers WHERE serial = ?",
+            (serial,)
         ).fetchone()
         if not opt:
             raise HTTPException(404, "Unknown optimizer")
@@ -295,6 +296,9 @@ def optimizer_analysis(serial: str, hours: int = 24):
     return {
         "serial": serial,
         "label": opt["label"],
+        "panel_model": opt["panel_model"],
+        "optimizer_model": opt["optimizer_model"],
+        "layout_status": opt["layout_status"],
         # Coverage only — how many cycles we saw this optimizer in at all.
         # Status counts and reliability live in /api/health, scoped to
         # daylight; duplicating them here with a different scope invites
@@ -375,6 +379,18 @@ def health(hours: int = 72, hour_of_day: int | None = None):
         cfg.db_path, hours=hours, hour_of_day=hour_of_day,
         cfg_timezone=cfg.site_timezone, decommissioned=cfg.decommissioned,
         grouping=_grouping(),
+    )
+
+
+@app.get("/api/wiring")
+def wiring(hours: int = 168):
+    """Panels whose current consistently trails their peers' while their
+    voltage keeps up — ranked, with flags, for a roof check."""
+    if not cfg.db_path.exists():
+        raise HTTPException(503, "Database not created yet — is the poller running?")
+    return analysis.wiring_check(
+        cfg.db_path, hours=hours, cfg_timezone=cfg.site_timezone,
+        decommissioned=cfg.decommissioned, grouping=_grouping(),
     )
 
 
@@ -742,14 +758,20 @@ def inverter_hourly(days: int = 7):
             partial = {}
         for i in range(days - 1, -1, -1):
             d = today - timedelta(days=i)
-            start, end = inverter_stats.day_bounds(d, tz)
-            hours = panel_daily._inverter_hour_energy(conn, start, end, tz)
+            prof = panel_daily.inverter_day_profile(conn, d, tz)
+            hours = prof["hours"]
+            total = prof["energy_wh"] if prof["energy_wh"] is not None else (
+                round(sum(hours.values()), 1) if hours else None)
             out.append({
                 "day": d.isoformat(),
                 "is_today": d == today,
                 "partial": partial.get(d.isoformat(), False),
                 "hours": {str(h): wh for h, wh in sorted(hours.items())},
-                "total_wh": round(sum(hours.values()), 1) if hours else None,
+                "cumulative": {str(h): wh for h, wh in sorted(prof["cumulative"].items())},
+                "in_progress": prof["in_progress"],
+                "first_reading_at": prof["first_reading_at"],
+                "last_reading_at": prof["last_reading_at"],
+                "total_wh": total,
             })
     return {"timezone": cfg.site_timezone, "days": out}
 

@@ -25,7 +25,7 @@
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 20px; }
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
   .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
-  .card .value { font-size: 20px; font-weight: 600; margin-top: 4px; }
+  .card .value { font-size: 20px; font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums; }
   .card .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
   .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
   .badge.ok { background: rgba(46,204,113,0.15); color: var(--ok); }
@@ -51,6 +51,7 @@
 <body>
   <h1 id="pageTitle">Loading…</h1>
   <div class="subtitle" id="pageSubtitle"></div>
+  <div class="subtitle" id="hardware" style="margin-top:-14px"></div>
   <div id="srcLegend"></div>
   <div id="dataHealth"></div>
 
@@ -200,6 +201,9 @@ async function loadAnalysis() {
   document.getElementById("pageTitle").textContent = `${a.label} — ${a.serial}`;
   document.getElementById("pageSubtitle").textContent =
     `Observed in ${a.observed_cycles} of ${a.successful_cycles} successful poll cycles in this range`;
+  document.getElementById("hardware").innerHTML = `Hardware ${src("se")} ·
+    optimizer <b>${a.optimizer_model ?? "unknown"}</b>${optChip(a.optimizer_model, a.layout_status)}
+    · panel label <b>${a.panel_model ?? "—"}</b>${a.layout_status ? ` · ${a.layout_status.toLowerCase()} in SolarEdge's layout` : ""}`;
 
   // Must be derived from the same (daylight-scoped) number that's displayed,
   // or the badge colour contradicts its own value.
@@ -238,6 +242,7 @@ async function loadAnalysis() {
       <div class="sub">median ${fmt(h.median_current, 3)} · max ${fmt(h.max_current, 3)} A · near 0: ${h.near_zero_pct ?? "—"}% of readings</div></div>
     <div class="card"><div class="label">Zero-Power${acc(1)} ${src("calc", "se")}</div><div class="value">${a.zero_power_count}</div><div class="sub">readings at exactly 0 W, including night · daytime ones are real moments of no output (see "near 0" above)</div></div>
   `;
+  animateCounters(document.getElementById("analysisCards"));
 
   const gapsEl = document.getElementById("gapsContainer");
   if (!a.gaps.length) {

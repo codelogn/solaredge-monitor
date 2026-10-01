@@ -6,6 +6,10 @@ Confirmed shape (2026-09-23, live account): the layout endpoint returns a
 tree of nested "children", where an optimizer node looks like:
     {"type": "OPTIMIZER", "serial": "1A2B3C4D-01", "name": "Optimizer 1.0.1",
      "displayOrder": "1.0.1", "properties": {"panelModelName": "ACME 400"}}
+Optimizer nodes also carry the optimizer's own part number ("model", e.g.
+"P400-...") and "status" (ACTIVE / INACTIVE — a replaced unit stays in the
+layout as INACTIVE). Both are read from the node or its "properties", since
+which of the two holds them isn't guaranteed.
 """
 from __future__ import annotations
 
@@ -17,13 +21,16 @@ logger = logging.getLogger(__name__)
 
 
 class Optimizer:
-    __slots__ = ("serial", "name", "display_order", "panel_model")
+    __slots__ = ("serial", "name", "display_order", "panel_model", "optimizer_model", "layout_status")
 
-    def __init__(self, serial: str, name: str, display_order: str, panel_model: str | None):
+    def __init__(self, serial: str, name: str, display_order: str, panel_model: str | None,
+                 optimizer_model: str | None = None, layout_status: str | None = None):
         self.serial = serial
         self.name = name
         self.display_order = display_order
         self.panel_model = panel_model
+        self.optimizer_model = optimizer_model
+        self.layout_status = layout_status
 
 
 def extract_optimizers(layout_json: dict) -> list[Optimizer]:
@@ -35,12 +42,15 @@ def extract_optimizers(layout_json: dict) -> list[Optimizer]:
 def _walk(node: object, optimizers: list[Optimizer]) -> None:
     if isinstance(node, dict):
         if node.get("type") == "OPTIMIZER" and node.get("serial"):
+            props = node.get("properties") or {}
             optimizers.append(
                 Optimizer(
                     serial=node["serial"],
                     name=node.get("name", ""),
                     display_order=node.get("displayOrder", ""),
-                    panel_model=node.get("properties", {}).get("panelModelName"),
+                    panel_model=props.get("panelModelName"),
+                    optimizer_model=props.get("model") or node.get("model"),
+                    layout_status=props.get("status") or node.get("status"),
                 )
             )
         for value in node.values():

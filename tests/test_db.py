@@ -220,3 +220,27 @@ def test_read_inverter_raises_with_reason_when_unreachable():
     with pytest.raises(modbus_client.ModbusUnavailable, match="connect failed"):
         # TEST-NET-1 address: guaranteed unroutable
         modbus_client.read_inverter("192.0.2.1", 1502, timeout=1, attempts=1)
+
+
+def test_layout_optimizer_model_and_status_are_kept(tmp_path):
+    from src.discover import extract_optimizers
+    layout = {"children": [
+        {"type": "OPTIMIZER", "serial": "AAAA-01", "name": "Optimizer 1.0.1", "displayOrder": "1.0.1",
+         "properties": {"panelModelName": "ACME 400", "model": "P400-X", "status": "INACTIVE"}},
+        # Same fields at the node's top level rather than in "properties".
+        {"type": "OPTIMIZER", "serial": "AAAA-02", "name": "Optimizer 1.0.2", "displayOrder": "1.0.2",
+         "model": "P370-Y", "status": "ACTIVE", "properties": {"panelModelName": "ACME"}},
+    ]}
+    found = {o.serial: o for o in extract_optimizers(layout)}
+    assert (found["AAAA-01"].optimizer_model, found["AAAA-01"].layout_status) == ("P400-X", "INACTIVE")
+    assert (found["AAAA-02"].optimizer_model, found["AAAA-02"].layout_status) == ("P370-Y", "ACTIVE")
+
+    db_path = tmp_path / "t.db"
+    db.init_db(db_path)
+    db.upsert_optimizers(db_path, [{"serial": "AAAA-02", "label": "x", "optimizer_model": "P370-Y",
+                                    "layout_status": "ACTIVE"}])
+    # A later layout without the fields must not wipe what was learned.
+    db.upsert_optimizers(db_path, [{"serial": "AAAA-02", "label": "x"}])
+    with db.connect(db_path) as conn:
+        row = conn.execute("SELECT optimizer_model, layout_status FROM optimizers").fetchone()
+    assert tuple(row) == ("P370-Y", "ACTIVE")

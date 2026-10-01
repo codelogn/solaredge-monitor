@@ -150,6 +150,8 @@ def run() -> None:
                             "serial": o.serial,
                             "label": f"{o.name} ({o.panel_model})",
                             "panel_model": o.panel_model,
+                            "optimizer_model": o.optimizer_model,
+                            "layout_status": o.layout_status,
                         }
                         for o in optimizers
                     ],

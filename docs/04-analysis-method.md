@@ -192,6 +192,32 @@ Hours use the window's measurement time converted to `SITE_TIMEZONE`. If
 peak output doesn't land near midday in the profile chart, that setting is
 wrong and every hour label is offset.
 
+## Roof check: steady voltage, low current (`wiring_check`)
+
+A panel's voltage at the optimizer input barely depends on light; its
+current is proportional to it. So each panel's window-mean **voltage** and
+**current** are divided by its peers' medians in the same 15-minute window
+(windows chosen per hour of day, as for the hourly profile), and:
+
+| Flag | Rule | Points at |
+|---|---|---|
+| LOW VOLTAGE | median voltage < 95% of peers | a failed bypass diode / cell string, or a connector dropping voltage |
+| CHECK WIRING | median current < 85% of peers, and < 90% in ≥ 75% of the hours of day | something that holds all day: dirt, damaged cells, panel-to-optimizer connectors — or a flatter/other-facing roof plane |
+| SHADE PATTERN | low hours form ≤ 2 stretches covering ≤ 60% of the day, with at least one hour < 70% | a shadow at the same time every day |
+| WATCH | low, but neither all day nor a clean shadow; or 85–90% all day | needs more days |
+| NOT ENOUGH DATA | fewer than 5 hours of day with ≥ 3 windows | — |
+
+Panels are ranked by flag, then by current vs peers. Also reported: low
+days, and **dropouts** — windows under 25% of the peers' current, marked
+when at least 2× the roof's typical share (≥ 5%), a hint of an intermittent
+connection or a passing shadow.
+
+What the data can't do is tell dirt from a bad connector: both lower the
+current all day at normal voltage. It narrows the roof visit to a few
+panels and says what to look at. With the whole array as peers, a panel on a
+less favourable roof plane can read low all day too — set `PANEL_GROUPS` by
+roof face to remove that. A 3-day range is noisy; 7–14 days is steadier.
+
 ## Limits worth remembering
 
 - Consistently low output can mean shade, soiling or orientation — not

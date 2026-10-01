@@ -173,6 +173,18 @@ const ACCURACY = {
       average rank are steadier. Whole-array ranks mostly reflect roof placement; ranks within
       roof-face groups (set in PANEL_GROUPS) cancel that out and are the better pointer to shade or a fault.`,
   },
+  16: {
+    title: "Roof check (steady voltage, low current)",
+    short: "points at where to look, can't prove a wiring fault from data alone",
+    long: `Each panel's voltage and current are compared with its peers' in the same 15-minute window.
+      Normal voltage with less current means less light is being turned into current, or some of it is
+      lost on the way: dirt or bird droppings, damaged cells, a flatter or differently-facing roof plane —
+      or extra resistance in the connectors between panel and optimizer. Low <b>all day</b> rules out a
+      passing shadow, which is why those panels are flagged for a roof check, but the data can't tell
+      dirt from a bad connector — look for both. With the whole array as peers (no PANEL_GROUPS), a
+      panel on a less favourable roof plane can also read low all day. Fewer than ~5 days of data makes
+      the hour-by-hour pattern noisy.`,
+  },
 };
 
 function acc(n) {
@@ -301,6 +313,132 @@ function seLagBanner(d) {
     Figures here show the panels as they were then, not now. Verdicts are still valid — every
     reading is analysed at the time it was measured — but the missing hours aren't counted
     until they arrive.</div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Optimizer model chip: the optimizer's part number from SolarEdge's layout,
+// shortened to its family ("P400-5NM4MRM-NA21" → "P400"), so mixed models in
+// one string — e.g. warranty replacements of a different model — stand out.
+// The same family always gets the same colour on every page.
+function optChip(model, layoutStatus) {
+  let html = "";
+  if (model) {
+    const short = model.split("-")[0];
+    const hue = [...short].reduce((n, c) => n + c.charCodeAt(0), 0) % 4;
+    html += `<span class="opt-chip m${hue}" title="Optimizer model ${model} — from SolarEdge's site layout">${short}</span>`;
+  }
+  if (layoutStatus && layoutStatus !== "ACTIVE") {
+    html += `<span class="opt-chip inactive" title="SolarEdge's layout lists this optimizer as ${layoutStatus} — typically a unit that was replaced but never removed from the layout">${layoutStatus.toLowerCase()}</span>`;
+  }
+  return html;
+}
+
+// ---------------------------------------------------------------------------
+// Auto-refresh with a visible countdown. Replaces a page's setInterval: runs
+// fn every `ms`, and shows the seconds to the next refresh in the top menu
+// (click it to refresh now) and in any element marked data-refresh-in.
+// `active()` pauses it — e.g. a page showing a past day has nothing new to
+// fetch — and the countdown hides while paused.
+const RING_LEN = 2 * Math.PI * 5.5;
+
+function autoRefresh(fn, ms, active = () => true) {
+  let due = Date.now() + ms, busy = false;
+  const run = async () => {
+    if (busy) return;
+    busy = true; draw();
+    try { await fn(); } finally { busy = false; due = Date.now() + ms; draw(); }
+  };
+  const fmtLeft = s => s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
+  function pill() {
+    let el = document.getElementById("refreshTimer");
+    const nav = document.querySelector(".site-nav");
+    if (!el && nav) {
+      nav.insertAdjacentHTML("beforeend", `
+        <button type="button" id="refreshTimer" class="refresh-timer" title="Next automatic refresh — click to refresh now">
+          <svg class="ring" viewBox="0 0 14 14" aria-hidden="true"><circle class="track" cx="7" cy="7" r="5.5"/>
+            <circle class="left" cx="7" cy="7" r="5.5" stroke-dasharray="${RING_LEN}"/></svg>
+          <span class="txt">next update</span> <b></b></button>`);
+      el = document.getElementById("refreshTimer");
+      el.addEventListener("click", run);
+    }
+    return el;
+  }
+  function draw() {
+    const on = active();
+    const left = Math.max(0, Math.ceil((due - Date.now()) / 1000));
+    const text = busy ? "now" : fmtLeft(left);
+    const el = pill();
+    if (el) {
+      el.hidden = !on;
+      el.classList.toggle("busy", busy);
+      el.querySelector(".txt").textContent = busy ? "updating" : "next update";
+      el.querySelector("b").textContent = busy ? "…" : text;
+      el.querySelector(".left").style.strokeDashoffset = busy ? 0 : RING_LEN * (1 - left * 1000 / ms);
+    }
+    document.querySelectorAll("[data-refresh-in]").forEach(e => {
+      e.textContent = !on ? "" : busy ? "updating…" : `next update in ${text}`;
+    });
+  }
+  setInterval(() => {
+    if (!busy && Date.now() >= due) { if (active()) run(); else due = Date.now() + ms; }
+    draw();
+  }, 1000);
+  document.addEventListener("DOMContentLoaded", draw);
+  return { now: run };
+}
+
+// ---------------------------------------------------------------------------
+// Rolling counters: after a page redraws its cards, every number in a card's
+// value ticks from what it showed last time to the new figure (from 0 on first
+// load). Cards are matched by their label, so a redraw keeps the old values.
+// Formatting (decimals, thousands separators, units) is kept as rendered.
+const COUNTER_MS = 900;
+const _counterLast = new Map();
+const _NUM = /\d[\d,]*(?:\.\d+)?/g;
+
+function animateCounters(root) {
+  const still = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  root.querySelectorAll(".card").forEach(card => {
+    const valueEl = card.querySelector(".value");
+    const labelEl = card.querySelector(".label");
+    if (!valueEl || !labelEl) return;
+    const label = (labelEl.firstChild?.textContent || labelEl.textContent).trim();
+    const walker = document.createTreeWalker(valueEl, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    nodes.forEach((node, ni) => {
+      const text = node.textContent;
+      const parts = [];
+      let m, last = 0;
+      _NUM.lastIndex = 0;
+      while ((m = _NUM.exec(text))) {
+        const raw = m[0];
+        const to = parseFloat(raw.replace(/,/g, ""));
+        const key = `${label}|${ni}|${parts.length}`;
+        const from = _counterLast.has(key) ? _counterLast.get(key) : 0;
+        _counterLast.set(key, to);
+        parts.push({
+          before: text.slice(last, m.index), from, to,
+          decimals: raw.includes(".") ? raw.split(".")[1].length : 0,
+          grouping: raw.includes(",") || to >= 1000,
+        });
+        last = m.index + raw.length;
+      }
+      if (!parts.length || still || parts.every(p => p.from === p.to)) return;
+      const tail = text.slice(last);
+      const render = k => parts.map(p => p.before + (p.from + (p.to - p.from) * k).toLocaleString(undefined, {
+        minimumFractionDigits: p.decimals, maximumFractionDigits: p.decimals, useGrouping: p.grouping,
+      })).join("") + tail;
+      const start = performance.now();
+      const step = now => {
+        const t = Math.min(1, (now - start) / COUNTER_MS);
+        node.textContent = t < 1 ? render(1 - Math.pow(1 - t, 3)) : text;   // ease-out
+        if (t < 1) requestAnimationFrame(step);
+      };
+      node.textContent = render(0);
+      requestAnimationFrame(step);
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------

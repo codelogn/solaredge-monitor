@@ -10,8 +10,12 @@ blame hardware for a network outage.
 ## Tables
 
 ### `optimizers`
-`serial` (PK), `label`, `panel_model`, `first_seen`, `last_seen` — discovered
-equipment. `panel_model` is SolarEdge's free-text module label; it is used
+`serial` (PK), `label`, `panel_model`, `optimizer_model`, `layout_status`,
+`first_seen`, `last_seen` — discovered equipment. `optimizer_model` is the
+optimizer's part number from the layout (e.g. `P400-…`, `P370-…`) and
+`layout_status` its `ACTIVE`/`INACTIVE` state there; a replaced optimizer
+stays in the layout as `INACTIVE`. Both are refreshed at each discovery, and a
+layout that omits them keeps the stored values. `panel_model` is SolarEdge's free-text module label; it is used
 for grouping only with `PANEL_GROUPS=solaredge` (see
 [04-analysis-method.md](04-analysis-method.md)); groups on one site can
 differ several-fold in output.
@@ -180,7 +184,8 @@ Two consequences:
 
 - **Adding a nullable column** — do it in `db._add_missing_columns()`, which
   checks `PRAGMA table_info` and `ALTER TABLE ... ADD COLUMN`. This is how
-  `panel_model` was added without discarding collected readings. It is
+  `panel_model`, `optimizer_model` and `layout_status` were added without
+  discarding collected readings. It is
   deliberately not a migration framework; it handles additive columns only.
 - **Changing a `CHECK` constraint** (e.g. adding a status value) cannot be
   done by `ALTER` and requires recreating the database. Until then the write

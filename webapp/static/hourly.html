@@ -223,7 +223,7 @@ function renderHour(h) {
     <span>Inverter this hour${acc(7)} ${src("inv")} <b>${info && info.inverter_wh != null ? fmt(info.inverter_wh) + " Wh" : "—"}</b></span>
     <span>Panels' own total ${src("se")} <b>${fmt(measured)} Wh</b></span>`;
 
-  let rows = Object.entries(per).map(([s, f]) => ({ serial: s, ...f, label: opts[s]?.label, group: groups[s] }));
+  let rows = Object.entries(per).map(([s, f]) => ({ serial: s, ...f, label: opts[s]?.label, optimizer_model: opts[s]?.optimizer_model, group: groups[s] }));
   const byEnergy = (a, b) => (b.measured_wh || 0) - (a.measured_wh || 0);
   if (basis === "group") rows.sort((a, b) => a.group.localeCompare(b.group) || byEnergy(a, b));
   else rows.sort(byEnergy);
@@ -240,7 +240,7 @@ function renderHour(h) {
     const tip = `estimated ${r.estimated_wh != null ? fmt(r.estimated_wh) + " Wh (inverter's hour shared out)" : "—"}`;
     return `${sep}<tr>
       <td class="rank">${rank != null ? `<span class="medal">${medal(rank)}</span> #${rank}` : `<span class="muted">—</span>`}</td>
-      <td><a href="optimizer.html?serial=${encodeURIComponent(r.serial)}">${pos(r.label)}</a></td>
+      <td><a href="optimizer.html?serial=${encodeURIComponent(r.serial)}">${pos(r.label)}</a>${optChip(r.optimizer_model)}</td>
       <td class="muted hide-sm">${r.group || "—"}</td>
       <td class="bar-cell" title="${tip}"><div class="bar-wrap">
         <div class="bar" style="width:${Math.round(barMax * (r.measured_wh || 0) / top)}px"></div>
@@ -292,7 +292,7 @@ function renderDay() {
         title="${tip}">${fmt(f.measured_wh)}${win ? `<span style="font-size:10px"> 🏆</span>` : ""}</td>`;
     }).join("");
     const b = dayBoard[o.serial] || {};
-    return `<tr><td class="rowhead"><a href="optimizer.html?serial=${encodeURIComponent(o.serial)}">${pos(o.label)}</a>
+    return `<tr><td class="rowhead"><a href="optimizer.html?serial=${encodeURIComponent(o.serial)}">${pos(o.label)}</a>${optChip(o.optimizer_model)}
       <span class="muted" style="font-size:11px">${groups[o.serial]}</span></td>${cells}
       <td class="stat">${b.wins ?? 0}</td><td class="stat">${b.top3 ?? 0}</td><td class="stat">${b.avg_rank != null ? fmt(b.avg_rank, 1) : "—"}</td></tr>`;
   }).join("");
@@ -339,7 +339,7 @@ function renderBoard() {
       ${th("label", "Panel", "")}<th>Group</th>${th("wins", "🏆 Wins")}${th("top3", "Top 3")}
       ${th("avg_rank", "Avg rank")}${th("scored_hours", "Ranked hours")}</tr></thead>
     <tbody>${rows.map(r => `<tr>
-      <td><a href="optimizer.html?serial=${encodeURIComponent(r.serial)}">${pos(r.label)}</a></td>
+      <td><a href="optimizer.html?serial=${encodeURIComponent(r.serial)}">${pos(r.label)}</a>${optChip(r.optimizer_model)}</td>
       <td class="muted">${r.group || "—"}</td>
       <td class="num">${r.wins}</td><td class="num">${r.top3}</td>
       <td class="num">${r.avg_rank != null ? fmt(r.avg_rank, 2) : "—"}</td>
@@ -370,7 +370,7 @@ document.getElementById("hourSelect").addEventListener("change", render);
 document.getElementById("rangeSelect").addEventListener("change", loadBoard);
 loadDay(); loadBoard();
 // Today's hours fill in as SolarEdge delivers them.
-setInterval(() => { if (day && day.is_today) loadDay(); }, 120000);
+autoRefresh(loadDay, 120000, () => !!(day && day.is_today));
 </script>
 </body>
 </html>
